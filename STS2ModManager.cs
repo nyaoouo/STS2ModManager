@@ -47,7 +47,10 @@ internal sealed class ModManagerForm : Form
     private readonly ListView enabledList;
     private readonly ListView disabledList;
     private readonly Button disableButton;
+    private readonly Button disableAllButton;
     private readonly Button enableButton;
+    private readonly Button enableAllButton;
+    private readonly Button openFolderButton;
     private readonly Button refreshButton;
     private readonly Button restartButton;
     private readonly Button savesButton;
@@ -101,7 +104,10 @@ internal sealed class ModManagerForm : Form
         enabledList = CreateListView();
         disabledList = CreateListView();
         disableButton = new Button { AutoSize = true };
+        disableAllButton = new Button { AutoSize = true };
         enableButton = new Button { AutoSize = true };
+        enableAllButton = new Button { AutoSize = true };
+        openFolderButton = new Button { AutoSize = true };
         refreshButton = new Button { AutoSize = true };
         restartButton = new Button { AutoSize = true };
         savesButton = new Button { AutoSize = true };
@@ -147,7 +153,10 @@ internal sealed class ModManagerForm : Form
         };
 
         buttonPanel.Controls.Add(disableButton);
+        buttonPanel.Controls.Add(disableAllButton);
         buttonPanel.Controls.Add(enableButton);
+        buttonPanel.Controls.Add(enableAllButton);
+        buttonPanel.Controls.Add(openFolderButton);
         buttonPanel.Controls.Add(refreshButton);
         buttonPanel.Controls.Add(restartButton);
         buttonPanel.Controls.Add(savesButton);
@@ -200,7 +209,10 @@ internal sealed class ModManagerForm : Form
         Controls.Add(statusStrip);
 
         disableButton.Click += (_, _) => MoveSelectedMod(enabledList, disabledDirectory, "disable");
+        disableAllButton.Click += (_, _) => MoveAllMods(enabledList, disabledDirectory, "disable");
         enableButton.Click += (_, _) => MoveSelectedMod(disabledList, modsDirectory, "enable");
+        enableAllButton.Click += (_, _) => MoveAllMods(disabledList, modsDirectory, "enable");
+        openFolderButton.Click += (_, _) => OpenSelectedModFolder();
         refreshButton.Click += (_, _) => ReloadLists(text.ReloadedModListStatus);
         restartButton.Click += (_, _) => RestartGame();
         savesButton.Click += (_, _) => ConfigureSaves();
@@ -262,7 +274,10 @@ internal sealed class ModManagerForm : Form
         Text = text.AppTitle;
         titleLabel.Text = text.TitleText;
         disableButton.Text = text.DisableSelectedButton;
+        disableAllButton.Text = text.DisableAllButton;
         enableButton.Text = text.EnableSelectedButton;
+        enableAllButton.Text = text.EnableAllButton;
+        openFolderButton.Text = text.OpenFolderButton;
         refreshButton.Text = text.RefreshButton;
         restartButton.Text = text.RestartGameButton;
         savesButton.Text = text.SavesButton;
@@ -321,25 +336,108 @@ internal sealed class ModManagerForm : Form
             return;
         }
 
+        var result = MoveMod(
+            selectedMod,
+            targetDirectory,
+            operationVerb,
+            $"selected mod at {FormatPathForDisplay(selectedMod.FullPath)}",
+            showDialogs: true);
+
+        if (result.Outcome == ModMoveOutcome.Changed)
+        {
+            ReloadLists(result.Message);
+            return;
+        }
+
+        SetStatus(result.Message);
+    }
+
+    private void MoveAllMods(ListView sourceList, string targetDirectory, string operationVerb)
+    {
+        var mods = sourceList.Items
+            .Cast<ListViewItem>()
+            .Select(item => item.Tag as ModInfo)
+            .Where(mod => mod is not null)
+            .Select(mod => mod!)
+            .ToList();
+
+        if (mods.Count == 0)
+        {
+            return;
+        }
+
+        if (MessageBox.Show(
+                text.BulkMovePrompt(operationVerb, mods.Count),
+                text.BulkMoveTitle,
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question) != DialogResult.Yes)
+        {
+            SetStatus(text.BulkMoveCanceledStatus(operationVerb));
+            return;
+        }
+
+        var changedCount = 0;
+        var unchangedCount = 0;
+        var failedCount = 0;
+
+        foreach (var mod in mods)
+        {
+            var result = MoveMod(
+                mod,
+                targetDirectory,
+                operationVerb,
+                $"bulk action for {mod.Id} at {FormatPathForDisplay(mod.FullPath)}",
+                showDialogs: false);
+
+            switch (result.Outcome)
+            {
+                case ModMoveOutcome.Changed:
+                    changedCount++;
+                    break;
+                case ModMoveOutcome.Failed:
+                    failedCount++;
+                    break;
+                default:
+                    unchangedCount++;
+                    break;
+            }
+        }
+
+        var statusMessage = text.BulkMoveCompletedStatus(operationVerb, changedCount, unchangedCount, failedCount);
+        if (changedCount > 0)
+        {
+            ReloadLists(statusMessage);
+            return;
+        }
+
+        SetStatus(statusMessage);
+    }
+
+    private ModMoveResult MoveMod(
+        ModInfo selectedMod,
+        string targetDirectory,
+        string operationVerb,
+        string incomingSourceLabel,
+        bool showDialogs)
+    {
+
         var conflicts = FindModsById(selectedMod.Id, selectedMod.FullPath);
         if (conflicts.Count > 0)
         {
             var choice = PromptConflictResolution(
                 selectedMod,
                 conflicts,
-                $"selected mod at {FormatPathForDisplay(selectedMod.FullPath)}");
+                incomingSourceLabel);
 
             if (choice == ConflictChoice.Cancel)
             {
-                SetStatus(text.OperationCanceledStatus(operationVerb, selectedMod.Id));
-                return;
+                return new ModMoveResult(ModMoveOutcome.Unchanged, text.OperationCanceledStatus(operationVerb, selectedMod.Id));
             }
 
             if (choice == ConflictChoice.KeepExisting)
             {
                 DeleteModDirectories(new[] { selectedMod });
-                ReloadLists(text.KeptExistingStatus(selectedMod.Id));
-                return;
+                return new ModMoveResult(ModMoveOutcome.Changed, text.KeptExistingStatus(selectedMod.Id));
             }
 
             DeleteModDirectories(conflicts);
@@ -348,29 +446,100 @@ internal sealed class ModManagerForm : Form
         var targetPath = Path.Combine(targetDirectory, selectedMod.FolderName);
         if (Directory.Exists(targetPath))
         {
-            MessageBox.Show(
-                text.TargetFolderAlreadyExistsMessage(selectedMod.FolderName),
-                text.MoveSkippedTitle,
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
-            SetStatus(text.MoveSkippedStatus(selectedMod.Id));
-            return;
+            if (showDialogs)
+            {
+                MessageBox.Show(
+                    text.TargetFolderAlreadyExistsMessage(selectedMod.FolderName),
+                    text.MoveSkippedTitle,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+
+            return new ModMoveResult(ModMoveOutcome.Unchanged, text.MoveSkippedStatus(selectedMod.Id));
         }
 
         try
         {
             MoveDirectory(selectedMod.FullPath, targetPath);
-            ReloadLists(text.MoveCompletedStatus(operationVerb, selectedMod.Id, selectedMod.Name));
+            return new ModMoveResult(ModMoveOutcome.Changed, text.MoveCompletedStatus(operationVerb, selectedMod.Id, selectedMod.Name));
         }
         catch (Exception exception)
         {
-            SetStatus(text.MoveFailedStatus(selectedMod.Id, exception.Message));
+            if (showDialogs)
+            {
+                MessageBox.Show(
+                    exception.Message,
+                    text.MoveErrorTitle,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+
+            return new ModMoveResult(ModMoveOutcome.Failed, text.MoveFailedStatus(selectedMod.Id, exception.Message));
+        }
+    }
+
+    private void OpenSelectedModFolder()
+    {
+        var selectedMod = GetActiveSelectedMod();
+        if (selectedMod is null)
+        {
+            SetStatus(text.SelectModFolderStatus);
+            return;
+        }
+
+        if (!Directory.Exists(selectedMod.FullPath))
+        {
+            var message = text.ModFolderMissingMessage(selectedMod.FullPath);
+            SetStatus(text.OpenFolderFailedStatus(message));
+            MessageBox.Show(
+                message,
+                text.OpenFolderErrorTitle,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"\"{selectedMod.FullPath}\"",
+                UseShellExecute = true
+            });
+            SetStatus(text.OpenFolderOpenedStatus(selectedMod.Id));
+        }
+        catch (Exception exception)
+        {
+            SetStatus(text.OpenFolderFailedStatus(exception.Message));
             MessageBox.Show(
                 exception.Message,
-                text.MoveErrorTitle,
+                text.OpenFolderErrorTitle,
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
         }
+    }
+
+    private ModInfo? GetActiveSelectedMod()
+    {
+        if (enabledList.Focused && enabledList.SelectedItems.Count > 0)
+        {
+            return enabledList.SelectedItems[0].Tag as ModInfo;
+        }
+
+        if (disabledList.Focused && disabledList.SelectedItems.Count > 0)
+        {
+            return disabledList.SelectedItems[0].Tag as ModInfo;
+        }
+
+        if (enabledList.SelectedItems.Count > 0)
+        {
+            return enabledList.SelectedItems[0].Tag as ModInfo;
+        }
+
+        return disabledList.SelectedItems.Count > 0
+            ? disabledList.SelectedItems[0].Tag as ModInfo
+            : null;
     }
 
     private void EnableArchiveDrop(Control control)
@@ -569,7 +738,10 @@ internal sealed class ModManagerForm : Form
     private void UpdateButtons()
     {
         disableButton.Enabled = enabledList.SelectedItems.Count > 0;
+        disableAllButton.Enabled = enabledList.Items.Count > 0;
         enableButton.Enabled = disabledList.SelectedItems.Count > 0;
+        enableAllButton.Enabled = disabledList.Items.Count > 0;
+        openFolderButton.Enabled = GetActiveSelectedMod() is not null;
     }
 
     private void SetStatus(string text)
@@ -2390,6 +2562,15 @@ internal sealed partial class ModManagerJsonContext : JsonSerializerContext
 
 internal sealed record OperationResult(bool RefreshRequired, string Message);
 
+internal sealed record ModMoveResult(ModMoveOutcome Outcome, string Message);
+
+internal enum ModMoveOutcome
+{
+    Changed,
+    Unchanged,
+    Failed
+}
+
 internal sealed record LanguageOption(AppLanguage Language, string DisplayName)
 {
     public override string ToString()
@@ -2455,7 +2636,10 @@ internal sealed class UiText
     public string AppTitle => isChinese ? "杀戮尖塔2 模组管理器" : "Slay the Spire 2 Mod Manager";
     public string TitleText => isChinese ? "管理已启用和已禁用的模组，或将 zip 压缩包拖进窗口以安装为禁用状态" : "Manage enabled and disabled mods, or drop a zip archive to install it as disabled";
     public string DisableSelectedButton => isChinese ? "禁用所选 ->" : "Disable selected ->";
+    public string DisableAllButton => isChinese ? "全部禁用 ->" : "Disable all ->";
     public string EnableSelectedButton => isChinese ? "<- 启用所选" : "<- Enable selected";
+    public string EnableAllButton => isChinese ? "<- 全部启用" : "<- Enable all";
+    public string OpenFolderButton => isChinese ? "打开文件夹" : "Open Folder";
     public string RefreshButton => isChinese ? "刷新" : "Refresh";
     public string RestartGameButton => isChinese ? "重启游戏" : "Restart Game";
     public string SavesButton => isChinese ? "存档..." : "Saves...";
@@ -2471,6 +2655,7 @@ internal sealed class UiText
     public string SelectedModNotResolvedStatus => isChinese ? "无法解析当前选中的模组。" : "The selected mod could not be resolved.";
     public string MoveSkippedTitle => isChinese ? "已跳过移动" : "Move Skipped";
     public string MoveErrorTitle => isChinese ? "移动错误" : "Move Error";
+    public string OpenFolderErrorTitle => isChinese ? "打开文件夹失败" : "Open Folder Failed";
     public string NoFilesProvidedStatus => isChinese ? "未提供任何文件。" : "No files were provided.";
     public string DisabledFolderMatchesModsMessage => isChinese ? "禁用模组目录不能与启用模组目录相同。" : "The disabled mods folder cannot be the same as the enabled mods folder.";
     public string InvalidDirectoryTitle => isChinese ? "无效目录" : "Invalid Directory";
@@ -2529,6 +2714,7 @@ internal sealed class UiText
     public string GameRestartErrorTitle => isChinese ? "重启失败" : "Restart Failed";
     public string SteamNotFoundMessage => isChinese ? "未找到 steam.exe。请确认 Steam 已安装。" : "Could not find steam.exe. Make sure Steam is installed.";
     public string GameRestartedStatus => isChinese ? "已强制关闭游戏并通过 Steam 重新启动。" : "Force-stopped the game and relaunched it through Steam.";
+    public string BulkMoveTitle => isChinese ? "批量切换模组" : "Bulk Toggle Mods";
 
     public string GameNotFoundMessage(string details)
     {
@@ -2559,9 +2745,45 @@ internal sealed class UiText
         return isChinese ? $"加载模组失败: {message}" : $"Failed to load mods: {message}";
     }
 
+    public string SelectModFolderStatus => isChinese ? "请选择一个模组以打开其文件夹。" : "Select a mod to open its folder.";
+
     public string GameRestartFailedStatus(string message)
     {
         return isChinese ? $"重启游戏失败: {message}" : $"Failed to restart the game: {message}";
+    }
+
+    public string BulkMovePrompt(string operationVerb, int count)
+    {
+        if (isChinese)
+        {
+            var action = operationVerb == "enable" ? "启用" : "禁用";
+            return $"要{action}全部 {count} 个模组吗?";
+        }
+
+        var actionText = operationVerb == "enable" ? "enable" : "disable";
+        return $"{char.ToUpperInvariant(actionText[0]) + actionText.Substring(1)} all {count} mod(s)?";
+    }
+
+    public string BulkMoveCanceledStatus(string operationVerb)
+    {
+        if (isChinese)
+        {
+            return operationVerb == "enable" ? "已取消全部启用。" : "已取消全部禁用。";
+        }
+
+        return operationVerb == "enable" ? "Canceled enable all." : "Canceled disable all.";
+    }
+
+    public string BulkMoveCompletedStatus(string operationVerb, int changedCount, int unchangedCount, int failedCount)
+    {
+        if (isChinese)
+        {
+            var action = operationVerb == "enable" ? "启用" : "禁用";
+            return $"批量{action}完成: 已处理 {changedCount}，未变更 {unchangedCount}，失败 {failedCount}。";
+        }
+
+        var actionText = operationVerb == "enable" ? "Enable all" : "Disable all";
+        return $"{actionText} complete: changed {changedCount}, unchanged {unchangedCount}, failed {failedCount}.";
     }
 
     public string OperationCanceledStatus(string operationVerb, string modId)
@@ -2605,6 +2827,21 @@ internal sealed class UiText
     public string MoveFailedStatus(string modId, string message)
     {
         return isChinese ? $"移动 {modId} 失败: {message}" : $"Failed to move {modId}: {message}";
+    }
+
+    public string ModFolderMissingMessage(string path)
+    {
+        return isChinese ? $"未找到模组文件夹: {path}" : $"Mod folder was not found: {path}";
+    }
+
+    public string OpenFolderOpenedStatus(string modId)
+    {
+        return isChinese ? $"已打开 {modId} 的文件夹。" : $"Opened folder for {modId}.";
+    }
+
+    public string OpenFolderFailedStatus(string message)
+    {
+        return isChinese ? $"打开文件夹失败: {message}" : $"Failed to open folder: {message}";
     }
 
     public string ModTooltip(string id, string name, string version, string folderName)
