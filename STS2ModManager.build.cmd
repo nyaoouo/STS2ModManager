@@ -100,6 +100,11 @@ if /i "%VARIANT%"=="aot" (
         echo     ^<SelfContained^>true^</SelfContained^>
         echo     ^<_SuppressWinFormsTrimError^>true^</_SuppressWinFormsTrimError^>
     )
+) else if /i "%VARIANT%"=="framework" (
+    >> "%PROJECT_FILE%" (
+        echo     ^<PublishAot^>false^</PublishAot^>
+        echo     ^<SelfContained^>false^</SelfContained^>
+    )
 )
 
 >> "%PROJECT_FILE%" (
