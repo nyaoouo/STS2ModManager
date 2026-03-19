@@ -31,6 +31,7 @@ internal sealed class ModManagerForm : Form
     private const string GameExecutableName = "SlayTheSpire2.exe";
     private const string SteamExecutableName = "steam.exe";
     private const int SlayTheSpire2AppId = 2868840;
+    private const string ModManifestFileName = "mod_manifest.json";
 
     private readonly string gameDirectory;
     private readonly string modsDirectory;
@@ -1230,12 +1231,8 @@ internal sealed class ModManagerForm : Form
             var segments = entryPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
             var directoryPath = GetArchiveDirectory(entryPath);
             var fileName = Path.GetFileName(entryPath);
-            var folderName = Path.GetFileNameWithoutExtension(fileName);
-
-            if (string.IsNullOrWhiteSpace(folderName))
-            {
-                return false;
-            }
+            var fileStem = Path.GetFileNameWithoutExtension(fileName);
+            var isSpecialManifestFile = string.Equals(fileName, ModManifestFileName, StringComparison.OrdinalIgnoreCase);
 
             var directoryName = string.IsNullOrEmpty(directoryPath)
                 ? string.Empty
@@ -1243,43 +1240,32 @@ internal sealed class ModManagerForm : Form
             var manifestCountInDirectory = manifestCountsByDirectory.TryGetValue(directoryPath, out var count)
                 ? count
                 : 0;
-            var extractFullDirectory =
-                !string.IsNullOrEmpty(directoryPath) &&
-                manifestCountInDirectory == 1 &&
-                string.Equals(directoryName, folderName, StringComparison.OrdinalIgnoreCase);
+
+            var modId = fileStem;
+            var modName = fileStem;
+            string? modVersion = null;
+
+            ReadManifestMetadata(document.RootElement, ref modId, ref modName, ref modVersion);
+
+            var folderName = ResolveArchiveFolderName(directoryName, fileStem, modId, isSpecialManifestFile);
+            if (string.IsNullOrWhiteSpace(folderName))
+            {
+                return false;
+            }
+
+            var extractFullDirectory = manifestCountInDirectory == 1 &&
+                (!string.IsNullOrEmpty(directoryPath) || isSpecialManifestFile);
 
             var sourceEntries = extractFullDirectory
-                ? archiveEntries
-                    .Where(candidate => candidate.NormalizedPath.StartsWith(directoryPath + "/", StringComparison.OrdinalIgnoreCase))
-                    .Select(candidate => candidate.NormalizedPath)
-                    .ToArray()
+                ? GetArchiveDirectoryEntries(archiveEntries, directoryPath)
                 : archiveEntries
-                    .Where(candidate => IsMatchingModPayload(candidate.NormalizedPath, directoryPath, folderName))
+                    .Where(candidate => IsMatchingModPayload(candidate.NormalizedPath, directoryPath, fileStem))
                     .Select(candidate => candidate.NormalizedPath)
                     .ToArray();
 
             if (sourceEntries.Length == 0)
             {
                 return false;
-            }
-
-            var modId = folderName;
-            var modName = folderName;
-            string? modVersion = null;
-
-            if (document.RootElement.TryGetProperty("id", out var idElement) && idElement.ValueKind == JsonValueKind.String)
-            {
-                modId = idElement.GetString() ?? modId;
-            }
-
-            if (document.RootElement.TryGetProperty("name", out var nameElement) && nameElement.ValueKind == JsonValueKind.String)
-            {
-                modName = nameElement.GetString() ?? modName;
-            }
-
-            if (document.RootElement.TryGetProperty("version", out var versionElement) && versionElement.ValueKind == JsonValueKind.String)
-            {
-                modVersion = versionElement.GetString();
             }
 
             installPlan = new ArchiveInstallPlan(
@@ -1370,6 +1356,37 @@ internal sealed class ModManagerForm : Form
         return lastSeparatorIndex < 0 ? string.Empty : entryPath.Substring(0, lastSeparatorIndex);
     }
 
+    private static string[] GetArchiveDirectoryEntries(IReadOnlyList<ArchiveEntryInfo> archiveEntries, string directoryPath)
+    {
+        if (string.IsNullOrEmpty(directoryPath))
+        {
+            return archiveEntries
+                .Where(candidate => string.IsNullOrEmpty(GetArchiveDirectory(candidate.NormalizedPath)))
+                .Select(candidate => candidate.NormalizedPath)
+                .ToArray();
+        }
+
+        return archiveEntries
+            .Where(candidate => candidate.NormalizedPath.StartsWith(directoryPath + "/", StringComparison.OrdinalIgnoreCase))
+            .Select(candidate => candidate.NormalizedPath)
+            .ToArray();
+    }
+
+    private static string ResolveArchiveFolderName(string directoryName, string fileStem, string modId, bool isSpecialManifestFile)
+    {
+        if (!string.IsNullOrWhiteSpace(directoryName))
+        {
+            return directoryName;
+        }
+
+        if (isSpecialManifestFile && !string.IsNullOrWhiteSpace(modId))
+        {
+            return modId.Trim();
+        }
+
+        return fileStem;
+    }
+
     private static bool IsMatchingModPayload(string entryPath, string directoryPath, string fileStem)
     {
         if (!string.Equals(GetArchiveDirectory(entryPath), directoryPath, StringComparison.OrdinalIgnoreCase))
@@ -1432,27 +1449,14 @@ internal sealed class ModManagerForm : Form
         var modId = folderName;
         var modName = folderName;
         string? modVersion = null;
-        var manifestPath = Path.Combine(directory.FullName, folderName + ".json");
+        var manifestPath = GetManifestPath(directory.FullName, folderName);
 
-        if (File.Exists(manifestPath))
+        if (!string.IsNullOrEmpty(manifestPath))
         {
             try
             {
                 using var document = JsonDocument.Parse(File.ReadAllText(manifestPath));
-                if (document.RootElement.TryGetProperty("id", out var idElement) && idElement.ValueKind == JsonValueKind.String)
-                {
-                    modId = idElement.GetString() ?? modId;
-                }
-
-                if (document.RootElement.TryGetProperty("name", out var nameElement) && nameElement.ValueKind == JsonValueKind.String)
-                {
-                    modName = nameElement.GetString() ?? modName;
-                }
-
-                if (document.RootElement.TryGetProperty("version", out var versionElement) && versionElement.ValueKind == JsonValueKind.String)
-                {
-                    modVersion = versionElement.GetString();
-                }
+                ReadManifestMetadata(document.RootElement, ref modId, ref modName, ref modVersion);
             }
             catch
             {
@@ -1460,6 +1464,38 @@ internal sealed class ModManagerForm : Form
         }
 
         return new ModInfo(modId, modName, modVersion, folderName, directory.FullName);
+    }
+
+    private static string? GetManifestPath(string directoryPath, string folderName)
+    {
+        var defaultManifestPath = Path.Combine(directoryPath, folderName + ".json");
+        if (File.Exists(defaultManifestPath))
+        {
+            return defaultManifestPath;
+        }
+
+        var specialManifestPath = Path.Combine(directoryPath, ModManifestFileName);
+        return File.Exists(specialManifestPath)
+            ? specialManifestPath
+            : null;
+    }
+
+    private static void ReadManifestMetadata(JsonElement manifestRoot, ref string modId, ref string modName, ref string? modVersion)
+    {
+        if (manifestRoot.TryGetProperty("id", out var idElement) && idElement.ValueKind == JsonValueKind.String)
+        {
+            modId = idElement.GetString() ?? modId;
+        }
+
+        if (manifestRoot.TryGetProperty("name", out var nameElement) && nameElement.ValueKind == JsonValueKind.String)
+        {
+            modName = nameElement.GetString() ?? modName;
+        }
+
+        if (manifestRoot.TryGetProperty("version", out var versionElement) && versionElement.ValueKind == JsonValueKind.String)
+        {
+            modVersion = versionElement.GetString();
+        }
     }
 
     private string FormatVersionText(string? version)
