@@ -264,6 +264,7 @@ internal sealed class ModManagerForm : Form
 
         listView.Columns.Add(string.Empty, 200);
         listView.Columns.Add(string.Empty, 280);
+        listView.Columns.Add(string.Empty, 120);
         listView.Columns.Add(string.Empty, 180);
         return listView;
     }
@@ -285,10 +286,12 @@ internal sealed class ModManagerForm : Form
         languageButton.Text = text.LanguageButton;
         enabledList.Columns[0].Text = text.IdColumn;
         enabledList.Columns[1].Text = text.NameColumn;
-        enabledList.Columns[2].Text = text.FolderColumn;
+        enabledList.Columns[2].Text = text.VersionColumn;
+        enabledList.Columns[3].Text = text.FolderColumn;
         disabledList.Columns[0].Text = text.IdColumn;
         disabledList.Columns[1].Text = text.NameColumn;
-        disabledList.Columns[2].Text = text.FolderColumn;
+        disabledList.Columns[2].Text = text.VersionColumn;
+        disabledList.Columns[3].Text = text.FolderColumn;
         UpdateDirectoryLabels();
     }
 
@@ -713,6 +716,7 @@ internal sealed class ModManagerForm : Form
         {
             var item = new ListViewItem(mod.Id);
             item.SubItems.Add(mod.Name);
+            item.SubItems.Add(FormatVersionText(mod.Version));
             item.SubItems.Add(mod.FolderName);
             item.Tag = mod;
             item.ToolTipText = text.ModTooltip(mod.Id, mod.Name, FormatVersionText(mod.Version), mod.FolderName);
@@ -724,15 +728,16 @@ internal sealed class ModManagerForm : Form
 
     private void ResizeListColumns(ListView listView)
     {
-        if (listView.Columns.Count != 3 || listView.ClientSize.Width <= 0)
+        if (listView.Columns.Count != 4 || listView.ClientSize.Width <= 0)
         {
             return;
         }
 
         var availableWidth = Math.Max(240, listView.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 4);
-        listView.Columns[0].Width = Math.Max(140, (int)(availableWidth * 0.26f));
-        listView.Columns[1].Width = Math.Max(220, (int)(availableWidth * 0.48f));
-        listView.Columns[2].Width = Math.Max(140, availableWidth - listView.Columns[0].Width - listView.Columns[1].Width);
+        listView.Columns[0].Width = Math.Max(140, (int)(availableWidth * 0.24f));
+        listView.Columns[1].Width = Math.Max(220, (int)(availableWidth * 0.34f));
+        listView.Columns[2].Width = Math.Max(110, (int)(availableWidth * 0.16f));
+        listView.Columns[3].Width = Math.Max(140, availableWidth - listView.Columns[0].Width - listView.Columns[1].Width - listView.Columns[2].Width);
     }
 
     private void UpdateButtons()
@@ -2647,6 +2652,7 @@ internal sealed class UiText
     public string LanguageButton => isChinese ? "语言..." : "Language...";
     public string IdColumn => "ID";
     public string NameColumn => isChinese ? "名称" : "Name";
+    public string VersionColumn => isChinese ? "版本" : "Version";
     public string FolderColumn => isChinese ? "文件夹" : "Folder";
     public string ArchiveImportTitle => isChinese ? "导入压缩包" : "Archive Import";
     public string ReloadedModListStatus => isChinese ? "已重新加载模组列表。" : "Reloaded mod list.";
