@@ -33,13 +33,16 @@ internal sealed class ModManagerForm : Form
     private const int SlayTheSpire2AppId = 2868840;
     private const string ModManifestFileName = "mod_manifest.json";
 
-    private readonly string gameDirectory;
-    private readonly string modsDirectory;
+    private string gameDirectory;
+    private string modsDirectory;
     private readonly string settingsFilePath;
 
+    private string? configuredGamePath;
     private string disabledDirectoryName;
     private string disabledDirectory;
     private AppLanguage language;
+    private LaunchMode launchMode;
+    private string launchArguments;
     private UiText text;
 
     private readonly GroupBox enabledGroup;
@@ -53,14 +56,22 @@ internal sealed class ModManagerForm : Form
     private readonly Button openFolderButton;
     private readonly Button refreshButton;
     private readonly Button restartButton;
-    private readonly Button savesButton;
-    private readonly Button settingsButton;
-    private readonly Button languageButton;
+    private readonly MenuStrip navigationMenu;
+    private readonly ToolStripMenuItem modsPageMenuItem;
+    private readonly ToolStripMenuItem savesPageMenuItem;
+    private readonly ToolStripMenuItem configPageMenuItem;
+    private readonly ToolStripMenuItem restartMenuItem;
     private readonly Label disabledFolderLabel;
     private readonly Label rootLabel;
     private readonly Label titleLabel;
     private readonly StatusStrip statusStrip;
     private readonly ToolStripStatusLabel statusLabel;
+    private readonly Panel pageHost;
+    private readonly Control modsPage;
+
+    private SaveManagerPage? savesPage;
+    private ConfigPage? configPage;
+    private AppPage activePage;
     private readonly string[] startupArchivePaths;
 
     public ModManagerForm(IReadOnlyList<string>? archivePaths = null)
@@ -75,13 +86,16 @@ internal sealed class ModManagerForm : Form
 
         settingsFilePath = Path.Combine(AppContext.BaseDirectory, "ModManager.settings.json");
         var settings = LoadSettings();
+        configuredGamePath = settings.GamePath;
         disabledDirectoryName = settings.DisabledDirectoryName;
         language = Localization.ParseOrDefault(settings.LanguageCode);
+        launchMode = settings.LaunchMode;
+        launchArguments = settings.LaunchArguments?.Trim() ?? string.Empty;
         text = new UiText(language);
 
         try
         {
-            gameDirectory = FindGameDirectory(AppContext.BaseDirectory);
+            gameDirectory = ResolveGameDirectory(configuredGamePath);
         }
         catch (Exception exception)
         {
@@ -94,10 +108,9 @@ internal sealed class ModManagerForm : Form
             return;
         }
 
-        modsDirectory = Path.Combine(gameDirectory, "mods");
-        disabledDirectory = Path.Combine(gameDirectory, disabledDirectoryName);
-        Directory.CreateDirectory(modsDirectory);
-        Directory.CreateDirectory(disabledDirectory);
+        modsDirectory = string.Empty;
+        disabledDirectory = string.Empty;
+        RefreshManagedDirectories(createDirectories: true);
 
         enabledGroup = new GroupBox { Dock = DockStyle.Fill };
         disabledGroup = new GroupBox { Dock = DockStyle.Fill };
@@ -110,9 +123,26 @@ internal sealed class ModManagerForm : Form
         openFolderButton = new Button { AutoSize = true };
         refreshButton = new Button { AutoSize = true };
         restartButton = new Button { AutoSize = true };
-        savesButton = new Button { AutoSize = true };
-        settingsButton = new Button { AutoSize = true };
-        languageButton = new Button { AutoSize = true };
+        navigationMenu = new MenuStrip
+        {
+            AutoSize = false,
+            BackColor = SystemColors.Control,
+            Dock = DockStyle.Fill,
+            GripStyle = ToolStripGripStyle.Hidden,
+            Padding = new Padding(2),
+            RenderMode = ToolStripRenderMode.System,
+            Stretch = true,
+            Height = 30
+        };
+        modsPageMenuItem = new ToolStripMenuItem();
+        savesPageMenuItem = new ToolStripMenuItem();
+        configPageMenuItem = new ToolStripMenuItem();
+        restartMenuItem = new ToolStripMenuItem();
+        modsPageMenuItem.Padding = new Padding(8, 4, 8, 4);
+        savesPageMenuItem.Padding = new Padding(8, 4, 8, 4);
+        configPageMenuItem.Padding = new Padding(8, 4, 8, 4);
+        restartMenuItem.Alignment = ToolStripItemAlignment.Right;
+        restartMenuItem.Padding = new Padding(8, 4, 8, 4);
         disabledFolderLabel = new Label
         {
             AutoEllipsis = true,
@@ -127,6 +157,7 @@ internal sealed class ModManagerForm : Form
         };
         statusStrip = new StatusStrip();
         statusLabel = new ToolStripStatusLabel { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
+        pageHost = new Panel { Dock = DockStyle.Fill };
 
         SuspendLayout();
 
@@ -158,10 +189,6 @@ internal sealed class ModManagerForm : Form
         buttonPanel.Controls.Add(enableAllButton);
         buttonPanel.Controls.Add(openFolderButton);
         buttonPanel.Controls.Add(refreshButton);
-        buttonPanel.Controls.Add(restartButton);
-        buttonPanel.Controls.Add(savesButton);
-        buttonPanel.Controls.Add(settingsButton);
-        buttonPanel.Controls.Add(languageButton);
 
         var listsLayout = new TableLayoutPanel
         {
@@ -187,6 +214,37 @@ internal sealed class ModManagerForm : Form
         bottomPanel.Controls.Add(rootLabel, 0, 0);
         bottomPanel.Controls.Add(disabledFolderLabel, 0, 1);
 
+        var modsPageLayout = new TableLayoutPanel
+        {
+            ColumnCount = 1,
+            Dock = DockStyle.Fill,
+            RowCount = 2
+        };
+        modsPageLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        modsPageLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        modsPageLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        modsPageLayout.Controls.Add(listsLayout, 0, 0);
+        modsPageLayout.Controls.Add(bottomPanel, 0, 1);
+        modsPage = modsPageLayout;
+
+        var navPanel = new TableLayoutPanel
+        {
+            ColumnCount = 1,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 0, 0, 12),
+            RowCount = 1
+        };
+        navPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        navPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        navigationMenu.Items.Add(modsPageMenuItem);
+        navigationMenu.Items.Add(savesPageMenuItem);
+        navigationMenu.Items.Add(configPageMenuItem);
+        navigationMenu.Items.Add(new ToolStripSeparator());
+        navigationMenu.Items.Add(restartMenuItem);
+        navPanel.Controls.Add(navigationMenu, 0, 0);
+
         var mainLayout = new TableLayoutPanel
         {
             ColumnCount = 1,
@@ -197,11 +255,11 @@ internal sealed class ModManagerForm : Form
 
         mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
         mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
         mainLayout.Controls.Add(titleLabel, 0, 0);
-        mainLayout.Controls.Add(listsLayout, 0, 1);
-        mainLayout.Controls.Add(bottomPanel, 0, 2);
+        mainLayout.Controls.Add(navPanel, 0, 1);
+        mainLayout.Controls.Add(pageHost, 0, 2);
 
         statusStrip.Items.Add(statusLabel);
 
@@ -215,9 +273,10 @@ internal sealed class ModManagerForm : Form
         openFolderButton.Click += (_, _) => OpenSelectedModFolder();
         refreshButton.Click += (_, _) => ReloadLists(text.ReloadedModListStatus);
         restartButton.Click += (_, _) => RestartGame();
-        savesButton.Click += (_, _) => ConfigureSaves();
-        settingsButton.Click += (_, _) => ConfigureDisabledDirectory();
-        languageButton.Click += (_, _) => ConfigureLanguage();
+        restartMenuItem.Click += (_, _) => RestartGame();
+        modsPageMenuItem.Click += (_, _) => ShowPage(AppPage.Mods);
+        savesPageMenuItem.Click += (_, _) => ShowPage(AppPage.Saves);
+        configPageMenuItem.Click += (_, _) => ShowPage(AppPage.Config);
         enabledList.SelectedIndexChanged += (_, _) => UpdateButtons();
         disabledList.SelectedIndexChanged += (_, _) => UpdateButtons();
         enabledList.DoubleClick += (_, _) => MoveSelectedMod(enabledList, disabledDirectory, "disable");
@@ -231,6 +290,8 @@ internal sealed class ModManagerForm : Form
         ResumeLayout(performLayout: true);
 
         ApplyLocalizedText();
+        RebuildPages();
+        ShowPage(AppPage.Mods);
         UpdateDirectoryLabels();
         ResizeListColumns(enabledList);
         ResizeListColumns(disabledList);
@@ -247,6 +308,87 @@ internal sealed class ModManagerForm : Form
         }
 
         InstallArchives(startupArchivePaths, text.ArchiveImportTitle);
+    }
+
+    private void RebuildPages()
+    {
+        pageHost.SuspendLayout();
+        pageHost.Controls.Clear();
+
+        savesPage = new SaveManagerPage(text, SetStatus)
+        {
+            Dock = DockStyle.Fill,
+            Visible = false
+        };
+        configPage = new ConfigPage(
+            text,
+            CurrentConfiguration(),
+            gameDirectory,
+            () => FindGameDirectory(AppContext.BaseDirectory),
+            ApplyConfiguration,
+            SetStatus)
+        {
+            Dock = DockStyle.Fill,
+            Visible = false
+        };
+
+        modsPage.Dock = DockStyle.Fill;
+        modsPage.Visible = false;
+
+        pageHost.Controls.Add(modsPage);
+        pageHost.Controls.Add(savesPage);
+        pageHost.Controls.Add(configPage);
+        EnableArchiveDrop(savesPage);
+        EnableArchiveDrop(configPage);
+        pageHost.ResumeLayout(performLayout: true);
+    }
+
+    private ModManagerConfig CurrentConfiguration()
+    {
+        return new ModManagerConfig(
+            configuredGamePath,
+            disabledDirectoryName,
+            language,
+            launchMode,
+            launchArguments);
+    }
+
+    private void ShowPage(AppPage page)
+    {
+        activePage = page;
+        modsPage.Visible = page == AppPage.Mods;
+        if (savesPage is not null)
+        {
+            savesPage.Visible = page == AppPage.Saves;
+        }
+
+        if (configPage is not null)
+        {
+            configPage.Visible = page == AppPage.Config;
+        }
+
+        switch (page)
+        {
+            case AppPage.Mods:
+                modsPage.BringToFront();
+                break;
+            case AppPage.Saves:
+                savesPage?.BringToFront();
+                savesPage?.RefreshData(text.SaveProfilesReloadedStatus);
+                break;
+            case AppPage.Config:
+                configPage?.BringToFront();
+                break;
+        }
+
+        UpdateNavigationButtons();
+    }
+
+    private void UpdateNavigationButtons()
+    {
+        modsPageMenuItem.Checked = activePage == AppPage.Mods;
+        savesPageMenuItem.Checked = activePage == AppPage.Saves;
+        configPageMenuItem.Checked = activePage == AppPage.Config;
     }
 
     private static ListView CreateListView()
@@ -281,9 +423,10 @@ internal sealed class ModManagerForm : Form
         openFolderButton.Text = text.OpenFolderButton;
         refreshButton.Text = text.RefreshButton;
         restartButton.Text = text.RestartGameButton;
-        savesButton.Text = text.SavesButton;
-        settingsButton.Text = text.DisabledFolderButton;
-        languageButton.Text = text.LanguageButton;
+        modsPageMenuItem.Text = text.ModsPageButton;
+        savesPageMenuItem.Text = text.SavesPageButton;
+        configPageMenuItem.Text = text.ConfigPageButton;
+        restartMenuItem.Text = text.RestartGameButton;
         enabledList.Columns[0].Text = text.IdColumn;
         enabledList.Columns[1].Text = text.NameColumn;
         enabledList.Columns[2].Text = text.VersionColumn;
@@ -293,6 +436,7 @@ internal sealed class ModManagerForm : Form
         disabledList.Columns[2].Text = text.VersionColumn;
         disabledList.Columns[3].Text = text.FolderColumn;
         UpdateDirectoryLabels();
+        UpdateNavigationButtons();
     }
 
     private void ReloadLists(string statusText)
@@ -760,20 +904,74 @@ internal sealed class ModManagerForm : Form
         disabledFolderLabel.Text = text.DisabledFolderLabel(disabledDirectoryName, disabledDirectory);
     }
 
-    private void ConfigureDisabledDirectory()
+    private void RefreshManagedDirectories(bool createDirectories)
     {
-        var updatedName = PromptForDirectoryName(disabledDirectoryName);
-        if (updatedName is null || string.Equals(updatedName, disabledDirectoryName, StringComparison.OrdinalIgnoreCase))
+        modsDirectory = Path.Combine(gameDirectory, "mods");
+        disabledDirectory = Path.Combine(gameDirectory, disabledDirectoryName);
+
+        if (!createDirectories)
         {
             return;
         }
 
-        var newDirectory = Path.Combine(gameDirectory, updatedName);
-        if (string.Equals(newDirectory, modsDirectory, StringComparison.OrdinalIgnoreCase))
+        Directory.CreateDirectory(modsDirectory);
+        Directory.CreateDirectory(disabledDirectory);
+    }
+
+    private string ResolveGameDirectory(string? preferredPath)
+    {
+        if (TryNormalizeGameDirectoryPath(preferredPath, out var normalizedGameDirectory))
+        {
+            return normalizedGameDirectory;
+        }
+
+        return FindGameDirectory(AppContext.BaseDirectory);
+    }
+
+    private static bool TryNormalizeGameDirectoryPath(string? candidatePath, out string normalizedGameDirectory)
+    {
+        normalizedGameDirectory = string.Empty;
+        if (string.IsNullOrWhiteSpace(candidatePath))
+        {
+            return false;
+        }
+
+        var trimmedPath = candidatePath.Trim().Trim('"');
+        if (trimmedPath.EndsWith(GameExecutableName, StringComparison.OrdinalIgnoreCase))
+        {
+            trimmedPath = Path.GetDirectoryName(trimmedPath) ?? string.Empty;
+        }
+
+        if (string.IsNullOrWhiteSpace(trimmedPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            trimmedPath = Path.GetFullPath(trimmedPath);
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (!ContainsGameExecutable(trimmedPath))
+        {
+            return false;
+        }
+
+        normalizedGameDirectory = trimmedPath;
+        return true;
+    }
+
+    private void ApplyConfiguration(ModManagerConfig updatedConfiguration)
+    {
+        if (!TryValidateDirectoryName(updatedConfiguration.DisabledDirectoryName, out var validationError))
         {
             MessageBox.Show(
-                text.DisabledFolderMatchesModsMessage,
-                text.InvalidDirectoryTitle,
+                validationError,
+                text.InvalidDirectoryNameTitle,
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
             return;
@@ -781,12 +979,43 @@ internal sealed class ModManagerForm : Form
 
         try
         {
-            MigrateDisabledDirectory(disabledDirectory, newDirectory);
-            disabledDirectoryName = updatedName;
-            disabledDirectory = newDirectory;
-            Directory.CreateDirectory(disabledDirectory);
+            var resolvedGameDirectory = ResolveGameDirectory(updatedConfiguration.GamePath);
+            var normalizedConfiguredGamePath = string.IsNullOrWhiteSpace(updatedConfiguration.GamePath)
+                ? null
+                : resolvedGameDirectory;
+            var newModsDirectory = Path.Combine(resolvedGameDirectory, "mods");
+            var newDisabledDirectory = Path.Combine(resolvedGameDirectory, updatedConfiguration.DisabledDirectoryName);
+            if (string.Equals(newDisabledDirectory, newModsDirectory, StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(
+                    text.DisabledFolderMatchesModsMessage,
+                    text.InvalidDirectoryTitle,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            var previousGameDirectory = gameDirectory;
+            var previousDisabledDirectory = disabledDirectory;
+            var sameGameDirectory = string.Equals(previousGameDirectory, resolvedGameDirectory, StringComparison.OrdinalIgnoreCase);
+            if (sameGameDirectory &&
+                !string.Equals(previousDisabledDirectory, newDisabledDirectory, StringComparison.OrdinalIgnoreCase))
+            {
+                MigrateDisabledDirectory(previousDisabledDirectory, newDisabledDirectory);
+            }
+
+            configuredGamePath = normalizedConfiguredGamePath;
+            gameDirectory = resolvedGameDirectory;
+            disabledDirectoryName = updatedConfiguration.DisabledDirectoryName;
+            language = updatedConfiguration.Language;
+            launchMode = updatedConfiguration.LaunchMode;
+            launchArguments = updatedConfiguration.LaunchArguments.Trim();
+            RefreshManagedDirectories(createDirectories: true);
+            ApplyLocalizedText();
             SaveSettings(CurrentSettings());
-            ReloadLists(text.DisabledFolderUpdatedStatus(disabledDirectoryName));
+            RebuildPages();
+            ShowPage(AppPage.Config);
+            ReloadLists(text.ConfigurationUpdatedStatus);
         }
         catch (Exception exception)
         {
@@ -795,28 +1024,13 @@ internal sealed class ModManagerForm : Form
                 text.UpdateFailedTitle,
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
-            SetStatus(text.DisabledFolderUpdateFailedStatus(exception.Message));
+            SetStatus(text.ConfigurationUpdateFailedStatus(exception.Message));
         }
-    }
-
-    private void ConfigureLanguage()
-    {
-        var updatedLanguage = PromptForLanguage(language);
-        if (!updatedLanguage.HasValue || updatedLanguage.Value == language)
-        {
-            return;
-        }
-
-        language = updatedLanguage.Value;
-        ApplyLocalizedText();
-        SaveSettings(CurrentSettings());
-        ReloadLists(text.LanguageUpdatedStatus);
     }
 
     private void ConfigureSaves()
     {
-        using var dialog = new SaveManagerDialog(text);
-        dialog.ShowDialog(this);
+        ShowPage(AppPage.Saves);
     }
 
     private void RestartGame()
@@ -824,7 +1038,7 @@ internal sealed class ModManagerForm : Form
         try
         {
             ForceStopGame();
-            LaunchGameViaSteam();
+            LaunchConfiguredGame();
             SetStatus(text.GameRestartedStatus);
         }
         catch (Exception exception)
@@ -858,6 +1072,36 @@ internal sealed class ModManagerForm : Form
         }
     }
 
+    private void LaunchConfiguredGame()
+    {
+        if (launchMode == LaunchMode.Direct)
+        {
+            LaunchGameDirectly();
+            return;
+        }
+
+        LaunchGameViaSteam();
+    }
+
+    private void LaunchGameDirectly()
+    {
+        var gameExecutablePath = Path.Combine(gameDirectory, GameExecutableName);
+        if (!File.Exists(gameExecutablePath))
+        {
+            throw new InvalidOperationException(text.GameExecutableMissingMessage(gameExecutablePath));
+        }
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = gameExecutablePath,
+            Arguments = launchArguments,
+            UseShellExecute = true,
+            WorkingDirectory = gameDirectory
+        };
+
+        Process.Start(startInfo);
+    }
+
     private void LaunchGameViaSteam()
     {
         var steamPath = TryFindSteamExecutablePath();
@@ -869,12 +1113,22 @@ internal sealed class ModManagerForm : Form
         var startInfo = new ProcessStartInfo
         {
             FileName = steamPath,
-            Arguments = $"-applaunch {SlayTheSpire2AppId}",
+            Arguments = BuildSteamLaunchArguments(),
             UseShellExecute = true,
             WorkingDirectory = Path.GetDirectoryName(steamPath) ?? AppContext.BaseDirectory
         };
 
         Process.Start(startInfo);
+    }
+
+    private string BuildSteamLaunchArguments()
+    {
+        if (string.IsNullOrWhiteSpace(launchArguments))
+        {
+            return $"-applaunch {SlayTheSpire2AppId}";
+        }
+
+        return $"-applaunch {SlayTheSpire2AppId} {launchArguments.Trim()}";
     }
 
     private string? PromptForDirectoryName(string currentName)
@@ -1114,7 +1368,15 @@ internal sealed class ModManagerForm : Form
                 ? settings.LanguageCode
                 : AppSettings.Default.LanguageCode;
 
-            return new AppSettings(disabledDirectoryValue, languageCode);
+            var gamePath = TryNormalizeGameDirectoryPath(settings.GamePath, out var normalizedGameDirectory)
+                ? normalizedGameDirectory
+                : null;
+            var savedLaunchMode = Enum.IsDefined(typeof(LaunchMode), settings.LaunchMode)
+                ? settings.LaunchMode
+                : AppSettings.Default.LaunchMode;
+            var savedLaunchArguments = settings.LaunchArguments?.Trim() ?? string.Empty;
+
+            return new AppSettings(disabledDirectoryValue, languageCode, gamePath, savedLaunchMode, savedLaunchArguments);
         }
         catch
         {
@@ -1130,7 +1392,12 @@ internal sealed class ModManagerForm : Form
 
     private AppSettings CurrentSettings()
     {
-        return new AppSettings(disabledDirectoryName, Localization.ToCode(language));
+        return new AppSettings(
+            disabledDirectoryName,
+            Localization.ToCode(language),
+            configuredGamePath,
+            launchMode,
+            launchArguments);
     }
 
     private bool TryValidateDirectoryName(string value, out string errorMessage)
@@ -1942,9 +2209,719 @@ internal sealed class ModManagerForm : Form
 }
 
 [SupportedOSPlatform("windows")]
-internal sealed class SaveManagerDialog : Form
+internal sealed class ConfigPage : UserControl
 {
     private readonly UiText text;
+    private readonly Func<string> autoDetectGameDirectory;
+    private readonly Action<ModManagerConfig> applyConfiguration;
+    private readonly Action<string> setStatus;
+    private readonly TextBox gamePathTextBox;
+    private readonly TextBox disabledFolderTextBox;
+    private readonly ComboBox languageComboBox;
+    private readonly ComboBox launchModeComboBox;
+    private readonly ComboBox forceSteamComboBox;
+    private readonly CheckBox autoslayCheckBox;
+    private readonly TextBox seedTextBox;
+    private readonly TextBox logFileTextBox;
+    private readonly CheckBox bootstrapCheckBox;
+    private readonly ComboBox fastMpComboBox;
+    private readonly TextBox clientIdTextBox;
+    private readonly CheckBox noModsCheckBox;
+    private readonly TextBox connectLobbyTextBox;
+    private readonly TextBox extraLaunchArgumentsTextBox;
+
+    public ConfigPage(
+        UiText text,
+        ModManagerConfig currentConfig,
+        string resolvedGameDirectory,
+        Func<string> autoDetectGameDirectory,
+        Action<ModManagerConfig> applyConfiguration,
+        Action<string> setStatus)
+    {
+        this.text = text;
+        this.autoDetectGameDirectory = autoDetectGameDirectory;
+        this.applyConfiguration = applyConfiguration;
+        this.setStatus = setStatus;
+
+        Dock = DockStyle.Fill;
+
+        var gamePathGroup = new GroupBox
+        {
+            Dock = DockStyle.Fill,
+            Text = text.GamePathGroupTitle
+        };
+        var currentGamePathLabel = new Label
+        {
+            AutoEllipsis = true,
+            Dock = DockStyle.Fill,
+            Text = text.CurrentGamePathLabel(resolvedGameDirectory),
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+        var gamePathLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.GamePathLabel
+        };
+        gamePathTextBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Text = currentConfig.GamePath ?? string.Empty
+        };
+        var browseButton = new Button { AutoSize = true, Text = text.BrowseButton };
+        var autoDetectButton = new Button { AutoSize = true, Text = text.AutoDetectButton };
+        var clearButton = new Button { AutoSize = true, Text = text.ClearButton };
+        var gamePathHintBox = new TextBox
+        {
+            BackColor = SystemColors.Control,
+            BorderStyle = BorderStyle.None,
+            Dock = DockStyle.Fill,
+            Multiline = true,
+            ReadOnly = true,
+            TabStop = false,
+            Text = text.GamePathHint
+        };
+
+        browseButton.Click += (_, _) => BrowseForGamePath();
+        autoDetectButton.Click += (_, _) => AutoDetectGamePath();
+        clearButton.Click += (_, _) => gamePathTextBox.Text = string.Empty;
+
+        var gamePathButtons = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false
+        };
+        gamePathButtons.Controls.Add(browseButton);
+        gamePathButtons.Controls.Add(autoDetectButton);
+        gamePathButtons.Controls.Add(clearButton);
+
+        var gamePathLayout = new TableLayoutPanel
+        {
+            ColumnCount = 3,
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12),
+            RowCount = 4
+        };
+        gamePathLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        gamePathLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        gamePathLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        gamePathLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        gamePathLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        gamePathLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        gamePathLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        gamePathLayout.Controls.Add(currentGamePathLabel, 0, 0);
+        gamePathLayout.SetColumnSpan(currentGamePathLabel, 3);
+        gamePathLayout.Controls.Add(gamePathLabel, 0, 1);
+        gamePathLayout.Controls.Add(gamePathTextBox, 1, 1);
+        gamePathLayout.Controls.Add(gamePathButtons, 2, 1);
+        gamePathLayout.Controls.Add(gamePathHintBox, 1, 2);
+        gamePathLayout.SetColumnSpan(gamePathHintBox, 2);
+        gamePathGroup.Controls.Add(gamePathLayout);
+
+        var generalGroup = new GroupBox
+        {
+            Dock = DockStyle.Fill,
+            Text = text.GeneralSettingsGroupTitle
+        };
+        var disabledFolderLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.DisabledFolderNameLabel
+        };
+        disabledFolderTextBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Text = currentConfig.DisabledDirectoryName
+        };
+        var disabledFolderHintLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            ForeColor = SystemColors.GrayText,
+            Text = text.DisabledFolderHint
+        };
+        var languageLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.InterfaceLanguageLabel
+        };
+        var languageOptions = new[]
+        {
+            new LanguageOption(AppLanguage.English, "English"),
+            new LanguageOption(AppLanguage.ChineseSimplified, "简体中文")
+        };
+        languageComboBox = new ComboBox
+        {
+            Dock = DockStyle.Fill,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            FormattingEnabled = true
+        };
+        languageComboBox.Items.AddRange(languageOptions.Cast<object>().ToArray());
+        languageComboBox.SelectedItem = languageOptions.First(option => option.Language == currentConfig.Language);
+
+        var generalLayout = new TableLayoutPanel
+        {
+            ColumnCount = 2,
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12),
+            RowCount = 4
+        };
+        generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        generalLayout.Controls.Add(disabledFolderLabel, 0, 0);
+        generalLayout.Controls.Add(disabledFolderTextBox, 1, 0);
+        generalLayout.Controls.Add(disabledFolderHintLabel, 1, 1);
+        generalLayout.Controls.Add(languageLabel, 0, 2);
+        generalLayout.Controls.Add(languageComboBox, 1, 2);
+        generalGroup.Controls.Add(generalLayout);
+
+        var launchGroup = new GroupBox
+        {
+            Dock = DockStyle.Fill,
+            Text = text.LaunchSettingsGroupTitle
+        };
+        var launchModeLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.LaunchModeLabel
+        };
+        var launchOptions = new[]
+        {
+            new LaunchModeOption(LaunchMode.Steam, text.LaunchViaSteamOption),
+            new LaunchModeOption(LaunchMode.Direct, text.LaunchDirectOption)
+        };
+        launchModeComboBox = new ComboBox
+        {
+            Dock = DockStyle.Fill,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            FormattingEnabled = true
+        };
+        launchModeComboBox.Items.AddRange(launchOptions.Cast<object>().ToArray());
+        launchModeComboBox.SelectedItem = launchOptions.First(option => option.LaunchMode == currentConfig.LaunchMode);
+
+        var parsedLaunchArguments = ParseLaunchArguments(currentConfig.LaunchArguments);
+        var lastSteamForceSelectionIndex = parsedLaunchArguments.ForceSteam switch
+        {
+            true => 1,
+            false => 0,
+            _ => 0
+        };
+
+        var forceSteamLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.ForceSteamLabel
+        };
+        forceSteamComboBox = new ComboBox
+        {
+            Dock = DockStyle.Fill,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            FormattingEnabled = true
+        };
+        forceSteamComboBox.Items.AddRange(new object[]
+        {
+            text.LaunchArgumentUnsetOption,
+            text.ForceSteamOnOption,
+            text.ForceSteamOffOption
+        });
+        forceSteamComboBox.SelectedIndex = parsedLaunchArguments.ForceSteam switch
+        {
+            true => 1,
+            false => 2,
+            _ => 0
+        };
+        launchModeComboBox.SelectedIndexChanged += (_, _) =>
+        {
+            var selectedMode = ((LaunchModeOption)launchModeComboBox.SelectedItem!).LaunchMode;
+            if (selectedMode == LaunchMode.Direct)
+            {
+                if (forceSteamComboBox.SelectedIndex != 2)
+                {
+                    lastSteamForceSelectionIndex = forceSteamComboBox.SelectedIndex;
+                }
+
+                forceSteamComboBox.SelectedIndex = 2;
+                forceSteamComboBox.Enabled = false;
+                return;
+            }
+
+            forceSteamComboBox.Enabled = true;
+            forceSteamComboBox.SelectedIndex = lastSteamForceSelectionIndex;
+        };
+        forceSteamComboBox.SelectedIndexChanged += (_, _) =>
+        {
+            if (forceSteamComboBox.Enabled && forceSteamComboBox.SelectedIndex != 2)
+            {
+                lastSteamForceSelectionIndex = forceSteamComboBox.SelectedIndex;
+            }
+        };
+
+        if (((LaunchModeOption)launchModeComboBox.SelectedItem!).LaunchMode == LaunchMode.Direct)
+        {
+            forceSteamComboBox.SelectedIndex = 2;
+            forceSteamComboBox.Enabled = false;
+        }
+
+        autoslayCheckBox = new CheckBox
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.AutoslayLabel,
+            Checked = parsedLaunchArguments.AutoSlay
+        };
+
+        var seedLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.SeedLabel
+        };
+        seedTextBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Text = parsedLaunchArguments.Seed ?? string.Empty
+        };
+
+        var logFileLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.LogFileLabel
+        };
+        logFileTextBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Text = parsedLaunchArguments.LogFilePath ?? string.Empty
+        };
+
+        bootstrapCheckBox = new CheckBox
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.BootstrapLabel,
+            Checked = parsedLaunchArguments.Bootstrap
+        };
+
+        var fastMpLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.FastMpLabel
+        };
+        fastMpComboBox = new ComboBox
+        {
+            Dock = DockStyle.Fill,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            FormattingEnabled = true
+        };
+        fastMpComboBox.Items.AddRange(new object[]
+        {
+            text.LaunchArgumentUnsetOption,
+            "host",
+            "host_standard",
+            "host_daily",
+            "host_custom",
+            "load",
+            "join"
+        });
+        fastMpComboBox.SelectedItem = string.IsNullOrWhiteSpace(parsedLaunchArguments.FastMpMode)
+            ? text.LaunchArgumentUnsetOption
+            : parsedLaunchArguments.FastMpMode;
+
+        var clientIdLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.ClientIdLabel
+        };
+        clientIdTextBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Text = parsedLaunchArguments.ClientId ?? string.Empty
+        };
+
+        noModsCheckBox = new CheckBox
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.NoModsLabel,
+            Checked = parsedLaunchArguments.NoMods
+        };
+
+        var connectLobbyLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.ConnectLobbyLabel
+        };
+        connectLobbyTextBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Text = parsedLaunchArguments.ConnectLobbyId ?? string.Empty
+        };
+
+        var extraLaunchArgumentsLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.ExtraLaunchArgumentsLabel
+        };
+        extraLaunchArgumentsTextBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Multiline = true,
+            ScrollBars = ScrollBars.Vertical,
+            Text = parsedLaunchArguments.ExtraArguments
+        };
+
+        var launchHintBox = new TextBox
+        {
+            BackColor = SystemColors.Control,
+            BorderStyle = BorderStyle.None,
+            Dock = DockStyle.Fill,
+            Multiline = true,
+            ReadOnly = true,
+            TabStop = false,
+            Text = text.LaunchArgumentsHint
+        };
+
+        var launchLayout = new TableLayoutPanel
+        {
+            ColumnCount = 4,
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12),
+            RowCount = 7
+        };
+        launchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        launchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+        launchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        launchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+        launchLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        launchLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        launchLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        launchLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        launchLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        launchLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        launchLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        launchLayout.Controls.Add(launchModeLabel, 0, 0);
+        launchLayout.Controls.Add(launchModeComboBox, 1, 0);
+        launchLayout.SetColumnSpan(launchModeComboBox, 3);
+        launchLayout.Controls.Add(forceSteamLabel, 0, 1);
+        launchLayout.Controls.Add(forceSteamComboBox, 1, 1);
+        launchLayout.Controls.Add(seedLabel, 2, 1);
+        launchLayout.Controls.Add(seedTextBox, 3, 1);
+        launchLayout.Controls.Add(logFileLabel, 0, 2);
+        launchLayout.Controls.Add(logFileTextBox, 1, 2);
+        launchLayout.Controls.Add(clientIdLabel, 2, 2);
+        launchLayout.Controls.Add(clientIdTextBox, 3, 2);
+        launchLayout.Controls.Add(fastMpLabel, 0, 3);
+        launchLayout.Controls.Add(fastMpComboBox, 1, 3);
+        launchLayout.Controls.Add(connectLobbyLabel, 2, 3);
+        launchLayout.Controls.Add(connectLobbyTextBox, 3, 3);
+        launchLayout.Controls.Add(autoslayCheckBox, 0, 4);
+        launchLayout.SetColumnSpan(autoslayCheckBox, 2);
+        launchLayout.Controls.Add(bootstrapCheckBox, 2, 4);
+        launchLayout.SetColumnSpan(bootstrapCheckBox, 1);
+        launchLayout.Controls.Add(noModsCheckBox, 3, 4);
+        launchLayout.Controls.Add(extraLaunchArgumentsLabel, 0, 5);
+        launchLayout.Controls.Add(extraLaunchArgumentsTextBox, 1, 5);
+        launchLayout.SetColumnSpan(extraLaunchArgumentsTextBox, 3);
+        launchLayout.Controls.Add(launchHintBox, 0, 6);
+        launchLayout.SetColumnSpan(launchHintBox, 4);
+        launchGroup.Controls.Add(launchLayout);
+
+        var saveButton = new Button { AutoSize = true, Text = text.SaveButton };
+        saveButton.Click += (_, _) =>
+        {
+            applyConfiguration(new ModManagerConfig(
+                NormalizeOptionalText(gamePathTextBox.Text),
+                disabledFolderTextBox.Text.Trim(),
+                ((LanguageOption)languageComboBox.SelectedItem!).Language,
+                ((LaunchModeOption)launchModeComboBox.SelectedItem!).LaunchMode,
+                BuildLaunchArguments()));
+        };
+
+        var buttonPanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false
+        };
+        buttonPanel.Controls.Add(saveButton);
+
+        var mainLayout = new TableLayoutPanel
+        {
+            ColumnCount = 1,
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12),
+            RowCount = 4
+        };
+        mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        mainLayout.Controls.Add(gamePathGroup, 0, 0);
+        mainLayout.Controls.Add(generalGroup, 0, 1);
+        mainLayout.Controls.Add(launchGroup, 0, 2);
+        mainLayout.Controls.Add(buttonPanel, 0, 3);
+
+        Controls.Add(mainLayout);
+    }
+
+    private void BrowseForGamePath()
+    {
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = text.BrowseGameFolderDescription,
+            SelectedPath = Directory.Exists(gamePathTextBox.Text) ? gamePathTextBox.Text : string.Empty,
+            ShowNewFolderButton = false
+        };
+
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+        {
+            gamePathTextBox.Text = dialog.SelectedPath;
+            setStatus(text.GamePathBrowsedStatus(dialog.SelectedPath));
+        }
+    }
+
+    private void AutoDetectGamePath()
+    {
+        try
+        {
+            gamePathTextBox.Text = autoDetectGameDirectory();
+            setStatus(text.GamePathDetectedStatus(gamePathTextBox.Text));
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                text.GameNotFoundMessage(exception.Message),
+                text.GameNotFoundTitle,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+    }
+
+    private static string? NormalizeOptionalText(string value)
+    {
+        var trimmed = value.Trim();
+        return trimmed.Length == 0 ? null : trimmed;
+    }
+
+    private string BuildLaunchArguments()
+    {
+        var parts = new List<string>();
+
+        if (forceSteamComboBox.SelectedIndex == 1)
+        {
+            parts.Add("--force-steam=on");
+        }
+        else if (forceSteamComboBox.SelectedIndex == 2)
+        {
+            parts.Add("--force-steam=off");
+        }
+
+        if (autoslayCheckBox.Checked)
+        {
+            parts.Add("--autoslay");
+        }
+
+        AppendOption(parts, "--seed", seedTextBox.Text);
+        AppendOption(parts, "--log-file", logFileTextBox.Text, quoteValue: true);
+
+        if (bootstrapCheckBox.Checked)
+        {
+            parts.Add("--bootstrap");
+        }
+
+        var fastMpMode = fastMpComboBox.SelectedItem as string;
+        if (!string.IsNullOrWhiteSpace(fastMpMode) && !string.Equals(fastMpMode, text.LaunchArgumentUnsetOption, StringComparison.Ordinal))
+        {
+            parts.Add($"--fastmp {fastMpMode}");
+        }
+
+        AppendOption(parts, "--clientId", clientIdTextBox.Text);
+
+        if (noModsCheckBox.Checked)
+        {
+            parts.Add("--nomods");
+        }
+
+        AppendOption(parts, "+connect_lobby", connectLobbyTextBox.Text);
+
+        var extraArguments = extraLaunchArgumentsTextBox.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(extraArguments))
+        {
+            parts.Add(extraArguments);
+        }
+
+        return string.Join(" ", parts);
+    }
+
+    private static void AppendOption(List<string> parts, string optionName, string value, bool quoteValue = false)
+    {
+        var trimmed = value.Trim();
+        if (trimmed.Length == 0)
+        {
+            return;
+        }
+
+        if (quoteValue && trimmed.IndexOfAny(new[] { ' ', '\t', '"' }) >= 0)
+        {
+            trimmed = "\"" + trimmed.Replace("\"", "\\\"") + "\"";
+        }
+
+        parts.Add($"{optionName} {trimmed}");
+    }
+
+    private static ParsedLaunchArguments ParseLaunchArguments(string launchArguments)
+    {
+        var parsed = new ParsedLaunchArguments();
+        var tokens = TokenizeArguments(launchArguments);
+
+        for (var index = 0; index < tokens.Count; index++)
+        {
+            var token = tokens[index];
+            switch (token)
+            {
+                case "--autoslay":
+                    parsed.AutoSlay = true;
+                    break;
+                case "--bootstrap":
+                    parsed.Bootstrap = true;
+                    break;
+                case "--nomods":
+                    parsed.NoMods = true;
+                    break;
+                case var _ when token.StartsWith("--force-steam=", StringComparison.OrdinalIgnoreCase):
+                    parsed.ForceSteam = token.EndsWith("=on", StringComparison.OrdinalIgnoreCase)
+                        ? true
+                        : token.EndsWith("=off", StringComparison.OrdinalIgnoreCase)
+                            ? false
+                            : parsed.ForceSteam;
+                    break;
+                case "--seed":
+                    if (TryTakeValue(tokens, ref index, out var seedValue))
+                    {
+                        parsed.Seed = seedValue;
+                    }
+                    break;
+                case "--log-file":
+                    if (TryTakeValue(tokens, ref index, out var logFileValue))
+                    {
+                        parsed.LogFilePath = logFileValue;
+                    }
+                    break;
+                case "--fastmp":
+                    if (TryTakeValue(tokens, ref index, out var fastMpValue))
+                    {
+                        parsed.FastMpMode = fastMpValue;
+                    }
+                    else
+                    {
+                        parsed.FastMpMode = "host";
+                    }
+                    break;
+                case "--clientId":
+                    if (TryTakeValue(tokens, ref index, out var clientIdValue))
+                    {
+                        parsed.ClientId = clientIdValue;
+                    }
+                    break;
+                case "+connect_lobby":
+                    if (TryTakeValue(tokens, ref index, out var lobbyValue))
+                    {
+                        parsed.ConnectLobbyId = lobbyValue;
+                    }
+                    break;
+                default:
+                    parsed.ExtraTokens.Add(token);
+                    break;
+            }
+        }
+
+        parsed.ExtraArguments = string.Join(" ", parsed.ExtraTokens);
+        return parsed;
+    }
+
+    private static bool TryTakeValue(IReadOnlyList<string> tokens, ref int index, out string value)
+    {
+        if (index + 1 < tokens.Count)
+        {
+            value = tokens[++index];
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
+    private static List<string> TokenizeArguments(string arguments)
+    {
+        var tokens = new List<string>();
+        if (string.IsNullOrWhiteSpace(arguments))
+        {
+            return tokens;
+        }
+
+        foreach (Match match in Regex.Matches(arguments, @"""(?:\\.|[^""])*""|\S+"))
+        {
+            var value = match.Value;
+            if (value.Length >= 2 && value[0] == '"' && value[^1] == '"')
+            {
+                value = value.Substring(1, value.Length - 2).Replace("\\\"", "\"");
+            }
+
+            tokens.Add(value);
+        }
+
+        return tokens;
+    }
+
+    private sealed class ParsedLaunchArguments
+    {
+        public bool? ForceSteam { get; set; }
+
+        public bool AutoSlay { get; set; }
+
+        public string? Seed { get; set; }
+
+        public string? LogFilePath { get; set; }
+
+        public bool Bootstrap { get; set; }
+
+        public string? FastMpMode { get; set; }
+
+        public string? ClientId { get; set; }
+
+        public bool NoMods { get; set; }
+
+        public string? ConnectLobbyId { get; set; }
+
+        public List<string> ExtraTokens { get; } = new();
+
+        public string ExtraArguments { get; set; } = string.Empty;
+    }
+}
+
+[SupportedOSPlatform("windows")]
+internal sealed class SaveManagerPage : UserControl
+{
+    private readonly UiText text;
+    private readonly Action<string> reportStatus;
     private readonly string saveRoot;
     private readonly Label introLabel;
     private readonly Label saveRootLabel;
@@ -1957,21 +2934,16 @@ internal sealed class SaveManagerDialog : Form
     private readonly Button transferToModdedButton;
     private readonly Button transferToVanillaButton;
     private readonly Button refreshButton;
-    private readonly Button closeButton;
-    private readonly StatusStrip statusStrip;
-    private readonly ToolStripStatusLabel statusLabel;
 
     private bool suppressSelectionEvents;
 
-    public SaveManagerDialog(UiText text)
+    public SaveManagerPage(UiText text, Action<string> reportStatus)
     {
         this.text = text;
+        this.reportStatus = reportStatus;
         saveRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SlayTheSpire2", "steam");
 
-        StartPosition = FormStartPosition.CenterParent;
-        MinimumSize = new Size(980, 560);
-        Size = new Size(1120, 680);
-        Text = text.SavesDialogTitle;
+        Dock = DockStyle.Fill;
 
         introLabel = new Label
         {
@@ -2009,11 +2981,6 @@ internal sealed class SaveManagerDialog : Form
         transferToModdedButton = new Button { AutoSize = true, Text = text.TransferToModdedButton };
         transferToVanillaButton = new Button { AutoSize = true, Text = text.TransferToVanillaButton };
         refreshButton = new Button { AutoSize = true, Text = text.RefreshButton };
-        closeButton = new Button { AutoSize = true, Text = text.CloseButton };
-        statusStrip = new StatusStrip();
-        statusLabel = new ToolStripStatusLabel { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
-
-        SuspendLayout();
 
         vanillaGroup.Controls.Add(vanillaList);
         moddedGroup.Controls.Add(moddedList);
@@ -2046,7 +3013,6 @@ internal sealed class SaveManagerDialog : Form
         transferButtonsPanel.Controls.Add(transferToModdedButton);
         transferButtonsPanel.Controls.Add(transferToVanillaButton);
         transferButtonsPanel.Controls.Add(refreshButton);
-        transferButtonsPanel.Controls.Add(closeButton);
 
         var listsLayout = new TableLayoutPanel
         {
@@ -2076,9 +3042,7 @@ internal sealed class SaveManagerDialog : Form
         mainLayout.Controls.Add(selectorLayout, 0, 1);
         mainLayout.Controls.Add(listsLayout, 0, 2);
 
-        statusStrip.Items.Add(statusLabel);
         Controls.Add(mainLayout);
-        Controls.Add(statusStrip);
 
         steamUserComboBox.SelectedIndexChanged += (_, _) =>
         {
@@ -2094,14 +3058,16 @@ internal sealed class SaveManagerDialog : Form
         transferToModdedButton.Click += (_, _) => TransferSelectedSave(SaveKind.Vanilla, SaveKind.Modded);
         transferToVanillaButton.Click += (_, _) => TransferSelectedSave(SaveKind.Modded, SaveKind.Vanilla);
         refreshButton.Click += (_, _) => ReloadSteamUsers(text.SaveProfilesReloadedStatus);
-        closeButton.Click += (_, _) => Close();
-
-        ResumeLayout(performLayout: true);
 
         saveRootLabel.Text = text.SaveRootLabel(saveRoot);
         ResizeSaveListColumns(vanillaList);
         ResizeSaveListColumns(moddedList);
         ReloadSteamUsers(text.ReadySaveManagerStatus);
+    }
+
+    public void RefreshData(string statusText)
+    {
+        ReloadSteamUsers(statusText);
     }
 
     private static ListView CreateSaveListView(UiText text)
@@ -2253,7 +3219,7 @@ internal sealed class SaveManagerDialog : Form
 
     private void SetStatus(string message)
     {
-        statusLabel.Text = message;
+        reportStatus(message);
     }
 
     private void TransferSelectedSave(SaveKind sourceKind, SaveKind targetKind)
@@ -2554,9 +3520,21 @@ internal sealed record ArchiveInstallStepResult(OperationResult Result, bool Sto
 
 internal sealed record ArchiveEntryInfo(ZipArchiveEntry Entry, string NormalizedPath);
 
-internal sealed record AppSettings(string DisabledDirectoryName, string? LanguageCode)
+internal sealed record ModManagerConfig(
+    string? GamePath,
+    string DisabledDirectoryName,
+    AppLanguage Language,
+    LaunchMode LaunchMode,
+    string LaunchArguments);
+
+internal sealed record AppSettings(
+    string DisabledDirectoryName,
+    string? LanguageCode,
+    string? GamePath,
+    LaunchMode LaunchMode,
+    string? LaunchArguments)
 {
-    public static AppSettings Default { get; } = new(".mods", null);
+    public static AppSettings Default { get; } = new(".mods", null, null, LaunchMode.Steam, null);
 }
 
 [JsonSourceGenerationOptions(WriteIndented = true)]
@@ -2584,6 +3562,14 @@ internal sealed record LanguageOption(AppLanguage Language, string DisplayName)
     }
 }
 
+internal sealed record LaunchModeOption(LaunchMode LaunchMode, string DisplayName)
+{
+    public override string ToString()
+    {
+        return DisplayName;
+    }
+}
+
 internal enum ConflictChoice
 {
     KeepIncoming,
@@ -2595,6 +3581,19 @@ internal enum AppLanguage
 {
     English,
     ChineseSimplified
+}
+
+internal enum LaunchMode
+{
+    Steam,
+    Direct
+}
+
+internal enum AppPage
+{
+    Mods,
+    Saves,
+    Config
 }
 
 internal static class Localization
@@ -2644,12 +3643,14 @@ internal sealed class UiText
     public string DisableAllButton => isChinese ? "全部禁用 ->" : "Disable all ->";
     public string EnableSelectedButton => isChinese ? "<- 启用所选" : "<- Enable selected";
     public string EnableAllButton => isChinese ? "<- 全部启用" : "<- Enable all";
+    public string ModsPageButton => isChinese ? "模组" : "Mods";
+    public string SavesPageButton => isChinese ? "存档" : "Saves";
+    public string ConfigPageButton => isChinese ? "配置" : "Config";
     public string OpenFolderButton => isChinese ? "打开文件夹" : "Open Folder";
     public string RefreshButton => isChinese ? "刷新" : "Refresh";
     public string RestartGameButton => isChinese ? "重启游戏" : "Restart Game";
     public string SavesButton => isChinese ? "存档..." : "Saves...";
-    public string DisabledFolderButton => isChinese ? "禁用目录..." : "Disabled folder...";
-    public string LanguageButton => isChinese ? "语言..." : "Language...";
+    public string ConfigButton => isChinese ? "配置..." : "Config...";
     public string IdColumn => "ID";
     public string NameColumn => isChinese ? "名称" : "Name";
     public string VersionColumn => isChinese ? "版本" : "Version";
@@ -2666,9 +3667,36 @@ internal sealed class UiText
     public string DisabledFolderMatchesModsMessage => isChinese ? "禁用模组目录不能与启用模组目录相同。" : "The disabled mods folder cannot be the same as the enabled mods folder.";
     public string InvalidDirectoryTitle => isChinese ? "无效目录" : "Invalid Directory";
     public string UpdateFailedTitle => isChinese ? "更新失败" : "Update Failed";
+    public string ConfigurationDialogTitle => isChinese ? "配置" : "Configuration";
+    public string ConfigurationUpdatedStatus => isChinese ? "配置已更新。" : "Configuration updated.";
+    public string GamePathGroupTitle => isChinese ? "游戏路径" : "Game Path";
+    public string GeneralSettingsGroupTitle => isChinese ? "常规设置" : "General";
+    public string LaunchSettingsGroupTitle => isChinese ? "启动设置" : "Launch";
+    public string GamePathLabel => isChinese ? "手动路径:" : "Manual path:";
+    public string GamePathHint => isChinese ? "留空表示自动检测。可填写游戏根目录，或直接填写 SlayTheSpire2.exe 的路径。" : "Leave blank to auto-detect. You can enter the game root or the full path to SlayTheSpire2.exe.";
+    public string CurrentGamePathLabel(string path)
+    {
+        return isChinese ? $"当前使用: {path}" : $"Currently using: {path}";
+    }
+
+    public string BrowseButton => isChinese ? "浏览..." : "Browse...";
+    public string AutoDetectButton => isChinese ? "自动检测" : "Auto detect";
+    public string ClearButton => isChinese ? "清空" : "Clear";
+    public string BrowseGameFolderDescription => isChinese ? "选择包含 SlayTheSpire2.exe 的文件夹" : "Select the folder that contains SlayTheSpire2.exe";
+    public string GamePathBrowsedStatus(string path)
+    {
+        return isChinese ? $"已选择游戏路径: {path}" : $"Selected game path: {path}";
+    }
+
+    public string GamePathDetectedStatus(string path)
+    {
+        return isChinese ? $"已自动检测到游戏路径: {path}" : $"Auto-detected game path: {path}";
+    }
     public string DisabledFolderDialogTitle => isChinese ? "禁用模组目录" : "Disabled Mods Folder";
     public string DisabledFolderPrompt => isChinese ? "选择游戏根目录下用于存放已禁用模组的文件夹名称。" : "Choose the folder name under the game root used to store disabled mods.";
     public string DisabledFolderHint => isChinese ? "示例: .mods, disabled-mods, archived-mods" : "Examples: .mods, disabled-mods, archived-mods";
+    public string DisabledFolderNameLabel => isChinese ? "禁用目录名:" : "Disabled folder name:";
+    public string InterfaceLanguageLabel => isChinese ? "界面语言:" : "Interface language:";
     public string SaveButton => isChinese ? "保存" : "Save";
     public string CancelButton => isChinese ? "取消" : "Cancel";
     public string InvalidDirectoryNameTitle => isChinese ? "无效目录名" : "Invalid Directory Name";
@@ -2676,6 +3704,25 @@ internal sealed class UiText
     public string InvalidFolderCharactersMessage => isChinese ? "文件夹名称包含无效字符。" : "The folder name contains invalid characters.";
     public string SingleFolderNameMessage => isChinese ? "请输入单个文件夹名称，不要填写路径。" : "Use a single folder name, not a path.";
     public string DotFolderNameMessage => isChinese ? "文件夹名称不能是 '.' 或 '..'。" : "The folder name cannot be '.' or '..'.";
+    public string LaunchModeLabel => isChinese ? "启动方式:" : "Launch mode:";
+    public string ForceSteamLabel => isChinese ? "Steam 集成:" : "Steam integration:";
+    public string AutoslayLabel => isChinese ? "自动开始新游戏 (--autoslay)" : "Auto-start new run (--autoslay)";
+    public string SeedLabel => isChinese ? "Seed:" : "Seed:";
+    public string LogFileLabel => isChinese ? "日志文件:" : "Log file:";
+    public string BootstrapLabel => isChinese ? "引导模式 (--bootstrap)" : "Bootstrap mode (--bootstrap)";
+    public string FastMpLabel => isChinese ? "快速多人模式:" : "Fast multiplayer:";
+    public string ClientIdLabel => isChinese ? "客户端 ID:" : "Client ID:";
+    public string NoModsLabel => isChinese ? "禁用所有模组 (--nomods)" : "Disable all mods (--nomods)";
+    public string ConnectLobbyLabel => isChinese ? "加入大厅 ID:" : "Connect lobby ID:";
+    public string ExtraLaunchArgumentsLabel => isChinese ? "额外参数:" : "Extra arguments:";
+    public string LaunchArgumentUnsetOption => isChinese ? "未设置" : "Not set";
+    public string ForceSteamOnOption => isChinese ? "强制启用 (--force-steam=on)" : "Force on (--force-steam=on)";
+    public string ForceSteamOffOption => isChinese ? "强制禁用 (--force-steam=off)" : "Force off (--force-steam=off)";
+    public string LaunchViaSteamOption => isChinese ? "通过 Steam 启动" : "Launch via Steam";
+    public string LaunchDirectOption => isChinese ? "直接启动游戏" : "Launch game directly";
+    public string LaunchArgumentsHint => isChinese
+        ? "常用参数已经拆成上面的控件。未覆盖的内容可以继续写到“额外参数”。\r\n\r\n直接启动通常需要设置 --force-steam=off。\r\n多人模式中 host 的 clientId 必须为 1，客户端建议使用 1000-1002。"
+        : "Common flags are available above. Use Extra arguments for anything not covered there.\r\n\r\nDirect launch usually needs --force-steam=off.\r\nFor fastmp host, clientId must be 1. Clients should use 1000-1002.";
     public string DuplicateModIdTitle => isChinese ? "重复的模组 ID" : "Duplicate Mod Id";
     public string IncomingVersionLabel => isChinese ? "导入版本:" : "Incoming version:";
     public string ExistingVersionsLabel => isChinese ? "现有版本:" : "Existing version(s):";
@@ -2719,7 +3766,7 @@ internal sealed class UiText
     public string ModdedSaveLabel => isChinese ? "模组" : "Modded";
     public string GameRestartErrorTitle => isChinese ? "重启失败" : "Restart Failed";
     public string SteamNotFoundMessage => isChinese ? "未找到 steam.exe。请确认 Steam 已安装。" : "Could not find steam.exe. Make sure Steam is installed.";
-    public string GameRestartedStatus => isChinese ? "已强制关闭游戏并通过 Steam 重新启动。" : "Force-stopped the game and relaunched it through Steam.";
+    public string GameRestartedStatus => isChinese ? "已强制关闭游戏并按当前配置重新启动。" : "Force-stopped the game and relaunched it with the configured launcher.";
     public string BulkMoveTitle => isChinese ? "批量切换模组" : "Bulk Toggle Mods";
 
     public string GameNotFoundMessage(string details)
@@ -2756,6 +3803,11 @@ internal sealed class UiText
     public string GameRestartFailedStatus(string message)
     {
         return isChinese ? $"重启游戏失败: {message}" : $"Failed to restart the game: {message}";
+    }
+
+    public string GameExecutableMissingMessage(string path)
+    {
+        return isChinese ? $"未找到游戏可执行文件: {path}" : $"Game executable was not found: {path}";
     }
 
     public string BulkMovePrompt(string operationVerb, int count)
@@ -2874,9 +3926,9 @@ internal sealed class UiText
         return isChinese ? $"已将禁用模组目录更新为 {disabledDirectoryName}。" : $"Disabled mods folder updated to {disabledDirectoryName}.";
     }
 
-    public string DisabledFolderUpdateFailedStatus(string message)
+    public string ConfigurationUpdateFailedStatus(string message)
     {
-        return isChinese ? $"更新禁用模组目录失败: {message}" : $"Failed to update disabled mods folder: {message}";
+        return isChinese ? $"更新配置失败: {message}" : $"Failed to update configuration: {message}";
     }
 
     public string SaveRootLabel(string saveRoot)

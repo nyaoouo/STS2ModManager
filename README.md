@@ -11,11 +11,14 @@ This tool helps you manage mods without manually moving folders around.
 - Lets you enable or disable a mod by moving its folder between those locations.
 - Can import mod `.zip` archives by drag-and-drop or by opening the program with archive paths.
 - Detects duplicate mod IDs and lets you choose whether to keep the existing mod or replace it.
-- Can restart Slay the Spire 2 through Steam.
+- Includes a dedicated config dialog for game path, language, disabled folder name, and launch settings.
+- Can restart Slay the Spire 2 either through Steam or by launching the game executable directly.
+- Supports custom launch arguments such as `--force-steam`, `--seed`, `--nomods`, and multiplayer-related flags.
 - Includes a save manager for moving save data between vanilla and modded save slots.
 - Supports English and Simplified Chinese.
 
 The app tries to find your Slay the Spire 2 install automatically by checking parent folders, Steam libraries, and common install paths.
+You can override that path manually from the config dialog if auto-detection is wrong for your setup.
 
 ## Release versions
 
