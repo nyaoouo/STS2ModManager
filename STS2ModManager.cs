@@ -1,3 +1,86 @@
+// =============================================================================
+// STS2ModManager.cs  –  Slay the Spire 2 Mod Manager
+// =============================================================================
+//
+// INDEX
+// ─────────────────────────────────────────────────────────────────────────────
+//  Program                     Entry point (STAThread → ModManagerForm)
+//
+//    Constants                 GameExecutableName, AppId, etc.
+//    Fields                    Form state: directories, UI controls, selection
+//    Constructor               Full UI layout (toolbar, card panel, nav, status)
+//    Page management           ShowPage, RebuildPages, UpdateNavigationButtons
+//    Localization apply        ApplyLocalizedText
+//    Mod card UI               SyncCardWidths, CreateSectionHeader,
+//                              CreateModCard, SelectCard
+//    Mod list                  ReloadLists, UpdateButtons,
+//                              GetSelectedMods, GetActiveSelectedMod
+//    Mod toggle                ToggleMod, ToggleAllMods
+//    Mod move engine           MoveMod, MoveDirectory, CopyDirectory
+//    Conflict resolution       FindModsById, PromptConflictResolution,
+//                              DeleteModDirectories, DescribeVersionComparison
+//    Folder actions            OpenSelectedModFolder, ExportSelectedMods
+//    Drag-and-drop             EnableArchiveDrop, HandleArchiveDragEnter/Drop
+//    Archive install           InstallArchives, InstallArchive,
+//                              InstallArchivePlan, ExtractArchiveToTemporaryFolder
+//    Archive parsing           TryReadArchiveInstallPlans,
+//                              TryReadArchiveManifestCandidate,
+//                              IsManifestCandidatePath, NormalizeArchivePath
+//    Game launch               RestartGame, ForceStopGame,
+//                              LaunchConfiguredGame, LaunchGameDirectly/ViaSteam
+//    Configuration             ApplyConfiguration, CurrentConfiguration,
+//                              MigrateDisabledDirectory
+//    Settings I/O              LoadSettings, SaveSettings, CurrentSettings
+//    Directory helpers         ResolveGameDirectory, FindGameDirectory,
+//                              RefreshManagedDirectories,
+//                              EnumerateGameDirectoryCandidates,
+//                              TryFindSteamPath, EnumerateSteamLibraryCandidates
+//    Manifest parsing          LoadMods, ReadModInfo, GetManifestPath,
+//                              ReadManifestMetadata, FormatVersionText,
+//                              CompareVersionStrings
+//    Validation                TryValidateDirectoryName, TryGetSafeRelativePath
+//    Utility                   FormatPathForDisplay, TryDeleteDirectory,
+//                              UpdateDirectoryLabels
+//
+//  ConfigPage : UserControl    Configuration tab (game path, general, launch)
+//    Constructor               UI layout and control initialization
+//    Browse/Auto-detect        BrowseForGamePath, AutoDetectGamePath
+//    Launch argument builder   BuildLaunchArguments, ParseLaunchArguments,
+//                              TokenizeArguments, AppendOption
+//    ParsedLaunchArguments     Inner class for parsed launch flag state
+//
+//  SaveManagerPage : UserControl   Save file copy/backup tab
+//    Constructor               UI layout
+//    Data loading              RefreshData, LoadSteamIds, ReadSaveProfileInfo
+//    Transfer                  TransferSave, BackupAndReplace
+//    Formatting                FormatSaveNotes, FormatSaveProfileLabel
+//
+//  Data records
+//    ModInfo                   Id, Name, Version, FolderName, FullPath
+//    SaveProfileInfo           Steam save slot metadata
+//    ArchiveInstallPlan        Extraction plan derived from a zip manifest
+//    ArchiveInstallStepResult  Per-step install outcome
+//    ArchiveEntryInfo          Zip entry + normalized path pair
+//    ModManagerConfig          Transient configuration passed to ApplyConfiguration
+//    AppSettings               Persisted settings (JSON)
+//    ModManagerJsonContext      Source-generation context for AppSettings JSON
+//    OperationResult           success + message pair
+//    ModMoveResult             ModMoveOutcome + message pair
+//    LanguageOption            ComboBox display wrapper for AppLanguage
+//    LaunchModeOption          ComboBox display wrapper for LaunchMode
+//
+//  Enums
+//    ModMoveOutcome            Changed / Unchanged / Failed
+//    ConflictChoice            KeepIncoming / KeepExisting / Cancel
+//    AppLanguage               English / ChineseSimplified
+//    LaunchMode                Steam / Direct
+//    AppPage                   Mods / Saves / Config
+//
+//  Localization                Language code ↔ AppLanguage helpers
+//  UiText                      All user-facing strings (English / 简体中文)
+//
+// =============================================================================
+
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -43,19 +126,20 @@ internal sealed class ModManagerForm : Form
     private AppLanguage language;
     private LaunchMode launchMode;
     private string launchArguments;
+    private bool splitModList;
     private UiText text;
 
-    private readonly GroupBox enabledGroup;
-    private readonly GroupBox disabledGroup;
-    private readonly ListView enabledList;
-    private readonly ListView disabledList;
-    private readonly Button disableButton;
+    private readonly Panel cardScrollPanel;
+    private readonly FlowLayoutPanel cardPanel;
     private readonly Button disableAllButton;
-    private readonly Button enableButton;
     private readonly Button enableAllButton;
+    private readonly Button exportButton;
     private readonly Button openFolderButton;
     private readonly Button refreshButton;
     private readonly Button restartButton;
+    private readonly HashSet<string> selectedModPaths = new(StringComparer.OrdinalIgnoreCase);
+    private int enabledModCount;
+    private int disabledModCount;
     private readonly MenuStrip navigationMenu;
     private readonly ToolStripMenuItem modsPageMenuItem;
     private readonly ToolStripMenuItem savesPageMenuItem;
@@ -91,6 +175,7 @@ internal sealed class ModManagerForm : Form
         language = Localization.ParseOrDefault(settings.LanguageCode);
         launchMode = settings.LaunchMode;
         launchArguments = settings.LaunchArguments?.Trim() ?? string.Empty;
+        splitModList = settings.SplitModList;
         text = new UiText(language);
 
         try
@@ -112,14 +197,20 @@ internal sealed class ModManagerForm : Form
         disabledDirectory = string.Empty;
         RefreshManagedDirectories(createDirectories: true);
 
-        enabledGroup = new GroupBox { Dock = DockStyle.Fill };
-        disabledGroup = new GroupBox { Dock = DockStyle.Fill };
-        enabledList = CreateListView();
-        disabledList = CreateListView();
-        disableButton = new Button { AutoSize = true };
+        cardScrollPanel = new Panel { AutoScroll = true, Dock = DockStyle.Fill };
+        cardPanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = true,
+            Padding = new Padding(4)
+        };
+        cardScrollPanel.Controls.Add(cardPanel);
+        cardScrollPanel.Resize += (_, _) => SyncCardWidths();
         disableAllButton = new Button { AutoSize = true };
-        enableButton = new Button { AutoSize = true };
         enableAllButton = new Button { AutoSize = true };
+        exportButton = new Button { AutoSize = true };
         openFolderButton = new Button { AutoSize = true };
         refreshButton = new Button { AutoSize = true };
         restartButton = new Button { AutoSize = true };
@@ -161,9 +252,6 @@ internal sealed class ModManagerForm : Form
 
         SuspendLayout();
 
-        enabledGroup.Controls.Add(enabledList);
-        disabledGroup.Controls.Add(disabledList);
-
         titleLabel = new Label
         {
             AutoSize = true,
@@ -172,37 +260,20 @@ internal sealed class ModManagerForm : Form
             Padding = new Padding(0, 0, 0, 12)
         };
 
-        var buttonPanel = new FlowLayoutPanel
+        var toolbarPanel = new FlowLayoutPanel
         {
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Dock = DockStyle.None,
-            FlowDirection = FlowDirection.TopDown,
-            Margin = new Padding(12, 0, 12, 0),
-            Padding = new Padding(0, 24, 0, 0),
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            Padding = new Padding(0, 0, 0, 6),
             WrapContents = false
         };
-
-        buttonPanel.Controls.Add(disableButton);
-        buttonPanel.Controls.Add(disableAllButton);
-        buttonPanel.Controls.Add(enableButton);
-        buttonPanel.Controls.Add(enableAllButton);
-        buttonPanel.Controls.Add(openFolderButton);
-        buttonPanel.Controls.Add(refreshButton);
-
-        var listsLayout = new TableLayoutPanel
-        {
-            ColumnCount = 3,
-            Dock = DockStyle.Fill,
-            RowCount = 1
-        };
-
-        listsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 46f));
-        listsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        listsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 54f));
-        listsLayout.Controls.Add(enabledGroup, 0, 0);
-        listsLayout.Controls.Add(buttonPanel, 1, 0);
-        listsLayout.Controls.Add(disabledGroup, 2, 0);
+        toolbarPanel.Controls.Add(enableAllButton);
+        toolbarPanel.Controls.Add(disableAllButton);
+        toolbarPanel.Controls.Add(exportButton);
+        toolbarPanel.Controls.Add(openFolderButton);
+        toolbarPanel.Controls.Add(refreshButton);
 
         var bottomPanel = new TableLayoutPanel
         {
@@ -218,13 +289,15 @@ internal sealed class ModManagerForm : Form
         {
             ColumnCount = 1,
             Dock = DockStyle.Fill,
-            RowCount = 2
+            RowCount = 3
         };
         modsPageLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        modsPageLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         modsPageLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
         modsPageLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        modsPageLayout.Controls.Add(listsLayout, 0, 0);
-        modsPageLayout.Controls.Add(bottomPanel, 0, 1);
+        modsPageLayout.Controls.Add(toolbarPanel, 0, 0);
+        modsPageLayout.Controls.Add(cardScrollPanel, 0, 1);
+        modsPageLayout.Controls.Add(bottomPanel, 0, 2);
         modsPage = modsPageLayout;
 
         var navPanel = new TableLayoutPanel
@@ -266,10 +339,9 @@ internal sealed class ModManagerForm : Form
         Controls.Add(mainLayout);
         Controls.Add(statusStrip);
 
-        disableButton.Click += (_, _) => MoveSelectedMod(enabledList, disabledDirectory, "disable");
-        disableAllButton.Click += (_, _) => MoveAllMods(enabledList, disabledDirectory, "disable");
-        enableButton.Click += (_, _) => MoveSelectedMod(disabledList, modsDirectory, "enable");
-        enableAllButton.Click += (_, _) => MoveAllMods(disabledList, modsDirectory, "enable");
+        disableAllButton.Click += (_, _) => ToggleAllMods(enable: false);
+        enableAllButton.Click += (_, _) => ToggleAllMods(enable: true);
+        exportButton.Click += (_, _) => ExportSelectedMods();
         openFolderButton.Click += (_, _) => OpenSelectedModFolder();
         refreshButton.Click += (_, _) => ReloadLists(text.ReloadedModListStatus);
         restartButton.Click += (_, _) => RestartGame();
@@ -277,12 +349,6 @@ internal sealed class ModManagerForm : Form
         modsPageMenuItem.Click += (_, _) => ShowPage(AppPage.Mods);
         savesPageMenuItem.Click += (_, _) => ShowPage(AppPage.Saves);
         configPageMenuItem.Click += (_, _) => ShowPage(AppPage.Config);
-        enabledList.SelectedIndexChanged += (_, _) => UpdateButtons();
-        disabledList.SelectedIndexChanged += (_, _) => UpdateButtons();
-        enabledList.DoubleClick += (_, _) => MoveSelectedMod(enabledList, disabledDirectory, "disable");
-        disabledList.DoubleClick += (_, _) => MoveSelectedMod(disabledList, modsDirectory, "enable");
-        enabledList.Resize += (_, _) => ResizeListColumns(enabledList);
-        disabledList.Resize += (_, _) => ResizeListColumns(disabledList);
         Shown += HandleShown;
 
         EnableArchiveDrop(this);
@@ -293,8 +359,6 @@ internal sealed class ModManagerForm : Form
         RebuildPages();
         ShowPage(AppPage.Mods);
         UpdateDirectoryLabels();
-        ResizeListColumns(enabledList);
-        ResizeListColumns(disabledList);
         ReloadLists(text.ReadyStatus(disabledDirectoryName));
     }
 
@@ -350,7 +414,8 @@ internal sealed class ModManagerForm : Form
             disabledDirectoryName,
             language,
             launchMode,
-            launchArguments);
+            launchArguments,
+            splitModList);
     }
 
     private void ShowPage(AppPage page)
@@ -391,35 +456,14 @@ internal sealed class ModManagerForm : Form
         configPageMenuItem.Checked = activePage == AppPage.Config;
     }
 
-    private static ListView CreateListView()
-    {
-        var listView = new ListView
-        {
-            Dock = DockStyle.Fill,
-            FullRowSelect = true,
-            GridLines = true,
-            HideSelection = false,
-            MultiSelect = false,
-            ShowItemToolTips = true,
-            View = View.Details
-        };
-
-        listView.Columns.Add(string.Empty, 200);
-        listView.Columns.Add(string.Empty, 280);
-        listView.Columns.Add(string.Empty, 120);
-        listView.Columns.Add(string.Empty, 180);
-        return listView;
-    }
-
     private void ApplyLocalizedText()
     {
         text = new UiText(language);
         Text = text.AppTitle;
         titleLabel.Text = text.TitleText;
-        disableButton.Text = text.DisableSelectedButton;
         disableAllButton.Text = text.DisableAllButton;
-        enableButton.Text = text.EnableSelectedButton;
         enableAllButton.Text = text.EnableAllButton;
+        exportButton.Text = text.ExportButton;
         openFolderButton.Text = text.OpenFolderButton;
         refreshButton.Text = text.RefreshButton;
         restartButton.Text = text.RestartGameButton;
@@ -427,14 +471,6 @@ internal sealed class ModManagerForm : Form
         savesPageMenuItem.Text = text.SavesPageButton;
         configPageMenuItem.Text = text.ConfigPageButton;
         restartMenuItem.Text = text.RestartGameButton;
-        enabledList.Columns[0].Text = text.IdColumn;
-        enabledList.Columns[1].Text = text.NameColumn;
-        enabledList.Columns[2].Text = text.VersionColumn;
-        enabledList.Columns[3].Text = text.FolderColumn;
-        disabledList.Columns[0].Text = text.IdColumn;
-        disabledList.Columns[1].Text = text.NameColumn;
-        disabledList.Columns[2].Text = text.VersionColumn;
-        disabledList.Columns[3].Text = text.FolderColumn;
         UpdateDirectoryLabels();
         UpdateNavigationButtons();
     }
@@ -446,15 +482,58 @@ internal sealed class ModManagerForm : Form
             UpdateDirectoryLabels();
             var enabledMods = LoadMods(modsDirectory);
             var disabledMods = LoadMods(disabledDirectory);
+            enabledModCount = enabledMods.Count;
+            disabledModCount = disabledMods.Count;
 
-            PopulateList(enabledList, enabledMods);
-            PopulateList(disabledList, disabledMods);
+            cardPanel.SuspendLayout();
+            cardPanel.Controls.Clear();
 
-            enabledGroup.Text = $"Enabled ({enabledMods.Count})";
-            enabledGroup.Text = text.EnabledGroup(enabledMods.Count);
-            disabledGroup.Text = text.DisabledGroup(disabledDirectoryName, disabledMods.Count);
-            ResizeListColumns(enabledList);
-            ResizeListColumns(disabledList);
+            if (splitModList)
+            {
+                if (enabledMods.Count > 0)
+                {
+                    cardPanel.Controls.Add(CreateSectionHeader(text.EnabledGroup(enabledMods.Count)));
+                    foreach (var mod in enabledMods)
+                    {
+                        cardPanel.Controls.Add(CreateModCard(mod, isEnabled: true));
+                    }
+                }
+
+                if (disabledMods.Count > 0)
+                {
+                    cardPanel.Controls.Add(CreateSectionHeader(text.DisabledGroup(disabledDirectoryName, disabledMods.Count)));
+                    foreach (var mod in disabledMods)
+                    {
+                        cardPanel.Controls.Add(CreateModCard(mod, isEnabled: false));
+                    }
+                }
+            }
+            else
+            {
+                // Merged view: all mods alphabetically, colored indicator distinguishes state
+                var allMods = enabledMods.Select(m => (Mod: m, Enabled: true))
+                    .Concat(disabledMods.Select(m => (Mod: m, Enabled: false)))
+                    .OrderBy(pair => pair.Mod.Name, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                if (allMods.Count > 0)
+                {
+                    cardPanel.Controls.Add(CreateSectionHeader(text.AllModsGroup(allMods.Count)));
+                    foreach (var (mod, enabled) in allMods)
+                    {
+                        cardPanel.Controls.Add(CreateModCard(mod, isEnabled: enabled));
+                    }
+                }
+            }
+
+            if (enabledMods.Count == 0 && disabledMods.Count == 0)
+            {
+                cardPanel.Controls.Add(CreateSectionHeader(text.NoModsFoundLabel));
+            }
+
+            cardPanel.ResumeLayout(performLayout: true);
+            selectedModPaths.Clear();
+            SyncCardWidths();
             SetStatus(statusText);
             UpdateButtons();
         }
@@ -469,25 +548,15 @@ internal sealed class ModManagerForm : Form
         }
     }
 
-    private void MoveSelectedMod(ListView sourceList, string targetDirectory, string operationVerb)
+    private void ToggleMod(ModInfo mod, bool enable)
     {
-        if (sourceList.SelectedItems.Count == 0)
-        {
-            return;
-        }
-
-        var selectedMod = sourceList.SelectedItems[0].Tag as ModInfo;
-        if (selectedMod is null)
-        {
-            SetStatus(text.SelectedModNotResolvedStatus);
-            return;
-        }
-
+        var targetDirectory = enable ? modsDirectory : disabledDirectory;
+        var operationVerb = enable ? "enable" : "disable";
         var result = MoveMod(
-            selectedMod,
+            mod,
             targetDirectory,
             operationVerb,
-            $"selected mod at {FormatPathForDisplay(selectedMod.FullPath)}",
+            $"selected mod at {FormatPathForDisplay(mod.FullPath)}",
             showDialogs: true);
 
         if (result.Outcome == ModMoveOutcome.Changed)
@@ -499,14 +568,12 @@ internal sealed class ModManagerForm : Form
         SetStatus(result.Message);
     }
 
-    private void MoveAllMods(ListView sourceList, string targetDirectory, string operationVerb)
+    private void ToggleAllMods(bool enable)
     {
-        var mods = sourceList.Items
-            .Cast<ListViewItem>()
-            .Select(item => item.Tag as ModInfo)
-            .Where(mod => mod is not null)
-            .Select(mod => mod!)
-            .ToList();
+        var operationVerb = enable ? "enable" : "disable";
+        var sourceDirectory = enable ? disabledDirectory : modsDirectory;
+        var targetDirectory = enable ? modsDirectory : disabledDirectory;
+        var mods = LoadMods(sourceDirectory);
 
         if (mods.Count == 0)
         {
@@ -627,12 +694,20 @@ internal sealed class ModManagerForm : Form
 
     private void OpenSelectedModFolder()
     {
-        var selectedMod = GetActiveSelectedMod();
-        if (selectedMod is null)
+        var selectedMods = GetSelectedMods();
+        if (selectedMods.Count == 0)
         {
             SetStatus(text.SelectModFolderStatus);
             return;
         }
+
+        if (selectedMods.Count > 1)
+        {
+            SetStatus(text.SelectSingleModFolderStatus);
+            return;
+        }
+
+        var selectedMod = selectedMods[0];
 
         if (!Directory.Exists(selectedMod.FullPath))
         {
@@ -667,27 +742,125 @@ internal sealed class ModManagerForm : Form
         }
     }
 
+    private void ExportSelectedMods()
+    {
+        var selectedMods = GetSelectedMods();
+        if (selectedMods.Count == 0)
+        {
+            SetStatus(text.SelectModsExportStatus);
+            return;
+        }
+
+        using var dialog = new SaveFileDialog
+        {
+            AddExtension = true,
+            DefaultExt = "zip",
+            FileName = BuildDefaultExportArchiveName(selectedMods),
+            Filter = text.ExportArchiveFilter,
+            OverwritePrompt = true,
+            Title = text.ExportArchiveDialogTitle
+        };
+
+        if (dialog.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(dialog.FileName))
+        {
+            SetStatus(text.ExportCanceledStatus);
+            return;
+        }
+
+        try
+        {
+            CreateModArchive(dialog.FileName, selectedMods);
+            var message = text.ExportCompletedStatus(selectedMods.Count, dialog.FileName);
+            SetStatus(message);
+            MessageBox.Show(
+                text.ExportCompletedMessage(selectedMods.Count, dialog.FileName),
+                text.ExportArchiveDialogTitle,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+        catch (Exception exception)
+        {
+            SetStatus(text.ExportFailedStatus(exception.Message));
+            MessageBox.Show(
+                exception.Message,
+                text.ExportFailedTitle,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+    }
+
+    private List<ModInfo> GetSelectedMods()
+    {
+        var selectedMods = new List<ModInfo>();
+        foreach (Control control in cardPanel.Controls)
+        {
+            if (control is Panel panel &&
+                panel.BorderStyle == BorderStyle.FixedSingle &&
+                panel.Tag is ModInfo mod &&
+                selectedModPaths.Contains(mod.FullPath))
+            {
+                selectedMods.Add(mod);
+            }
+        }
+
+        return selectedMods;
+    }
+
     private ModInfo? GetActiveSelectedMod()
     {
-        if (enabledList.Focused && enabledList.SelectedItems.Count > 0)
-        {
-            return enabledList.SelectedItems[0].Tag as ModInfo;
-        }
-
-        if (disabledList.Focused && disabledList.SelectedItems.Count > 0)
-        {
-            return disabledList.SelectedItems[0].Tag as ModInfo;
-        }
-
-        if (enabledList.SelectedItems.Count > 0)
-        {
-            return enabledList.SelectedItems[0].Tag as ModInfo;
-        }
-
-        return disabledList.SelectedItems.Count > 0
-            ? disabledList.SelectedItems[0].Tag as ModInfo
-            : null;
+        var selectedMods = GetSelectedMods();
+        return selectedMods.Count == 1 ? selectedMods[0] : null;
     }
+
+    private string BuildDefaultExportArchiveName(IReadOnlyList<ModInfo> selectedMods)
+    {
+        return selectedMods.Count == 1
+            ? $"{selectedMods[0].FolderName}.zip"
+            : $"mods-{DateTime.Now:yyyyMMdd-HHmmss}.zip";
+    }
+
+    private static void CreateModArchive(string archivePath, IReadOnlyList<ModInfo> mods)
+    {
+        var directory = Path.GetDirectoryName(archivePath);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        if (File.Exists(archivePath))
+        {
+            File.Delete(archivePath);
+        }
+
+        using var archive = ZipFile.Open(archivePath, ZipArchiveMode.Create);
+        foreach (var mod in mods.OrderBy(mod => mod.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            if (!Directory.Exists(mod.FullPath))
+            {
+                throw new DirectoryNotFoundException(mod.FullPath);
+            }
+
+            AddDirectoryToArchive(archive, mod.FullPath, mod.FolderName);
+        }
+    }
+
+    private static void AddDirectoryToArchive(ZipArchive archive, string sourceDirectory, string archiveRoot)
+    {
+        var files = Directory.GetFiles(sourceDirectory, "*", SearchOption.AllDirectories);
+        if (files.Length == 0)
+        {
+            archive.CreateEntry($"{NormalizeArchivePath(archiveRoot)}/");
+            return;
+        }
+
+        foreach (var filePath in files)
+        {
+            var relativePath = Path.GetRelativePath(sourceDirectory, filePath);
+            var entryName = NormalizeArchivePath(Path.Combine(archiveRoot, relativePath));
+            archive.CreateEntryFromFile(filePath, entryName, CompressionLevel.Optimal);
+        }
+    }
+
 
     private void EnableArchiveDrop(Control control)
     {
@@ -791,8 +964,8 @@ internal sealed class ModManagerForm : Form
             installPlan.Id,
             installPlan.Name,
             installPlan.Version,
-            installPlan.FolderName,
-            Path.Combine(disabledDirectory, installPlan.FolderName));
+                installPlan.InstallFolderName,
+                Path.Combine(disabledDirectory, installPlan.InstallFolderName));
 
         var conflicts = FindModsById(incomingMod.Id);
         if (conflicts.Count > 0)
@@ -819,11 +992,11 @@ internal sealed class ModManagerForm : Form
             DeleteModDirectories(conflicts);
         }
 
-        var targetPath = Path.Combine(disabledDirectory, installPlan.FolderName);
+        var targetPath = Path.Combine(disabledDirectory, installPlan.InstallFolderName);
         if (Directory.Exists(targetPath))
         {
             return new ArchiveInstallStepResult(
-                new OperationResult(false, text.ArchiveTargetFolderExists(archiveFileName, installPlan.FolderName)),
+                new OperationResult(false, text.ArchiveTargetFolderExists(archiveFileName, installPlan.InstallFolderName)),
                 StopProcessingArchive: false);
         }
 
@@ -831,9 +1004,14 @@ internal sealed class ModManagerForm : Form
         try
         {
             extractionRoot = ExtractArchiveToTemporaryFolder(archivePath, installPlan);
-            MoveDirectory(Path.Combine(extractionRoot, installPlan.FolderName), targetPath);
+            MoveDirectory(Path.Combine(extractionRoot, installPlan.InstallFolderName), targetPath);
             return new ArchiveInstallStepResult(
-                new OperationResult(true, text.ArchiveInstalled(archiveFileName, installPlan.Id, disabledDirectoryName)),
+                new OperationResult(true, text.ArchiveInstalled(
+                    archiveFileName,
+                    installPlan.Id,
+                    disabledDirectoryName,
+                    installPlan.ArchiveFolderName,
+                    installPlan.InstallFolderName)),
                 StopProcessingArchive: false);
         }
         catch (Exception exception)
@@ -851,46 +1029,184 @@ internal sealed class ModManagerForm : Form
         }
     }
 
-    private void PopulateList(ListView listView, IReadOnlyList<ModInfo> mods)
+    private const int CardMinWidth = 250;
+    private const int CardSpacing = 6;
+    private const int CardHeight = 90;
+
+    private void SyncCardWidths()
     {
-        listView.BeginUpdate();
-        listView.Items.Clear();
-
-        foreach (var mod in mods)
-        {
-            var item = new ListViewItem(mod.Id);
-            item.SubItems.Add(mod.Name);
-            item.SubItems.Add(FormatVersionText(mod.Version));
-            item.SubItems.Add(mod.FolderName);
-            item.Tag = mod;
-            item.ToolTipText = text.ModTooltip(mod.Id, mod.Name, FormatVersionText(mod.Version), mod.FolderName);
-            listView.Items.Add(item);
-        }
-
-        listView.EndUpdate();
-    }
-
-    private void ResizeListColumns(ListView listView)
-    {
-        if (listView.Columns.Count != 4 || listView.ClientSize.Width <= 0)
+        var scrollWidth = cardScrollPanel.ClientSize.Width;
+        if (scrollWidth <= 0)
         {
             return;
         }
 
-        var availableWidth = Math.Max(240, listView.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 4);
-        listView.Columns[0].Width = Math.Max(140, (int)(availableWidth * 0.24f));
-        listView.Columns[1].Width = Math.Max(220, (int)(availableWidth * 0.34f));
-        listView.Columns[2].Width = Math.Max(110, (int)(availableWidth * 0.16f));
-        listView.Columns[3].Width = Math.Max(140, availableWidth - listView.Columns[0].Width - listView.Columns[1].Width - listView.Columns[2].Width);
+        // Subtract scrollbar width so the panel never triggers a horizontal scrollbar.
+        // Pinning both Min and Max width breaks the AutoSize circular dependency:
+        // AutoSize=true still manages height, but width is locked to exactly panelWidth.
+        var panelWidth = Math.Max(CardMinWidth + 24, scrollWidth - SystemInformation.VerticalScrollBarWidth);
+        cardPanel.MinimumSize = new Size(panelWidth, 0);
+        cardPanel.MaximumSize = new Size(panelWidth, 0);
+
+        var available = panelWidth - cardPanel.Padding.Horizontal;
+        var cardsPerRow = Math.Max(1, available / (CardMinWidth + CardSpacing * 2));
+        var cardWidth = (available - cardsPerRow * CardSpacing * 2) / cardsPerRow;
+        var headerWidth = available - CardSpacing * 2;
+
+        foreach (Control c in cardPanel.Controls)
+        {
+            // Section headers span the full row; mod cards share the row
+            if (c is Panel p && p.BorderStyle == BorderStyle.FixedSingle)
+            {
+                c.Width = Math.Max(CardMinWidth, cardWidth);
+            }
+            else
+            {
+                c.Width = Math.Max(CardMinWidth, headerWidth);
+            }
+        }
+    }
+
+    private Panel CreateSectionHeader(string label)
+    {
+        var header = new Panel
+        {
+            Height = 26,
+            Margin = new Padding(CardSpacing, CardSpacing + 2, CardSpacing, 2)
+        };
+        var headerLabel = new Label
+        {
+            AutoSize = false,
+            Dock = DockStyle.Fill,
+            Font = new Font(Font, FontStyle.Bold),
+            ForeColor = SystemColors.GrayText,
+            Text = label,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(2, 0, 0, 0)
+        };
+        header.Controls.Add(headerLabel);
+        return header;
+    }
+
+    private Panel CreateModCard(ModInfo mod, bool isEnabled)
+    {
+        var statusColor = isEnabled
+            ? Color.FromArgb(76, 175, 80)
+            : Color.FromArgb(180, 180, 180);
+
+        var card = new Panel
+        {
+            Height = CardHeight,
+            Margin = new Padding(CardSpacing),
+            BorderStyle = BorderStyle.FixedSingle,
+            BackColor = SystemColors.Window,
+            Cursor = Cursors.Hand,
+            Tag = mod
+        };
+
+        var indicator = new Panel
+        {
+            Dock = DockStyle.Left,
+            Width = 5,
+            BackColor = statusColor
+        };
+
+        var contentLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 2,
+            Padding = new Padding(8, 6, 8, 6)
+        };
+        contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        // Keep enough room for a wrapped two-line title without leaving a large dead zone above it.
+        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34f));
+        contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+        var nameLabel = new Label
+        {
+            AutoSize = false,
+            Dock = DockStyle.Fill,
+            Font = new Font(Font, FontStyle.Bold),
+            ForeColor = isEnabled ? SystemColors.ControlText : SystemColors.GrayText,
+            Text = mod.Name,
+            // No AutoEllipsis: text wraps naturally within the fixed-width label
+            TextAlign = ContentAlignment.TopLeft
+        };
+
+        var detailLabel = new Label
+        {
+            AutoSize = false,
+            AutoEllipsis = true,
+            Dock = DockStyle.Fill,
+            ForeColor = SystemColors.GrayText,
+            Text = $"ID: {mod.Id}  \u2022  {FormatVersionText(mod.Version)}  \u2022  {mod.FolderName}",
+            TextAlign = ContentAlignment.TopLeft
+        };
+
+        var toggleButton = new Button
+        {
+            AutoSize = true,
+            Anchor = AnchorStyles.None,
+            Text = isEnabled ? text.DisableModButton : text.EnableModButton
+        };
+        toggleButton.Click += (_, _) => ToggleMod(mod, enable: !isEnabled);
+
+        contentLayout.Controls.Add(nameLabel, 0, 0);
+        contentLayout.Controls.Add(toggleButton, 1, 0);
+        contentLayout.SetRowSpan(toggleButton, 2);
+        contentLayout.Controls.Add(detailLabel, 0, 1);
+
+        card.Controls.Add(contentLayout);
+        card.Controls.Add(indicator);
+
+        void SelectThis(object? s, EventArgs e) => SelectCard(card, mod);
+        card.Click += SelectThis;
+        contentLayout.Click += SelectThis;
+        nameLabel.Click += SelectThis;
+        detailLabel.Click += SelectThis;
+        indicator.Click += SelectThis;
+
+        return card;
+    }
+
+    private void SelectCard(Panel card, ModInfo mod)
+    {
+        var toggleSelection = (ModifierKeys & Keys.Control) == Keys.Control;
+        if (toggleSelection)
+        {
+            if (!selectedModPaths.Add(mod.FullPath))
+            {
+                selectedModPaths.Remove(mod.FullPath);
+            }
+        }
+        else
+        {
+            selectedModPaths.Clear();
+            selectedModPaths.Add(mod.FullPath);
+        }
+
+        foreach (Control c in cardPanel.Controls)
+        {
+            if (c is Panel p && p.BorderStyle == BorderStyle.FixedSingle && p.Tag is ModInfo currentMod)
+            {
+                p.BackColor = selectedModPaths.Contains(currentMod.FullPath)
+                    ? Color.FromArgb(219, 234, 249)
+                    : SystemColors.Window;
+            }
+        }
+
+        UpdateButtons();
     }
 
     private void UpdateButtons()
     {
-        disableButton.Enabled = enabledList.SelectedItems.Count > 0;
-        disableAllButton.Enabled = enabledList.Items.Count > 0;
-        enableButton.Enabled = disabledList.SelectedItems.Count > 0;
-        enableAllButton.Enabled = disabledList.Items.Count > 0;
-        openFolderButton.Enabled = GetActiveSelectedMod() is not null;
+        var selectedCount = selectedModPaths.Count;
+        disableAllButton.Enabled = enabledModCount > 0;
+        enableAllButton.Enabled = disabledModCount > 0;
+        exportButton.Enabled = selectedCount > 0;
+        openFolderButton.Enabled = selectedCount == 1;
     }
 
     private void SetStatus(string text)
@@ -1010,6 +1326,7 @@ internal sealed class ModManagerForm : Form
             language = updatedConfiguration.Language;
             launchMode = updatedConfiguration.LaunchMode;
             launchArguments = updatedConfiguration.LaunchArguments.Trim();
+            splitModList = updatedConfiguration.SplitModList;
             RefreshManagedDirectories(createDirectories: true);
             ApplyLocalizedText();
             SaveSettings(CurrentSettings());
@@ -1376,7 +1693,7 @@ internal sealed class ModManagerForm : Form
                 : AppSettings.Default.LaunchMode;
             var savedLaunchArguments = settings.LaunchArguments?.Trim() ?? string.Empty;
 
-            return new AppSettings(disabledDirectoryValue, languageCode, gamePath, savedLaunchMode, savedLaunchArguments);
+            return new AppSettings(disabledDirectoryValue, languageCode, gamePath, savedLaunchMode, savedLaunchArguments, settings.SplitModList);
         }
         catch
         {
@@ -1397,7 +1714,8 @@ internal sealed class ModManagerForm : Form
             Localization.ToCode(language),
             configuredGamePath,
             launchMode,
-            launchArguments);
+            launchArguments,
+            splitModList);
     }
 
     private bool TryValidateDirectoryName(string value, out string errorMessage)
@@ -1684,6 +2002,7 @@ internal sealed class ModManagerForm : Form
             var manifestCountInDirectory = manifestCountsByDirectory.TryGetValue(directoryPath, out var count)
                 ? count
                 : 0;
+            var totalManifestCount = manifestCountsByDirectory.Values.Sum();
 
             var modId = fileStem;
             var modName = fileStem;
@@ -1691,14 +2010,20 @@ internal sealed class ModManagerForm : Form
 
             ReadManifestMetadata(document.RootElement, ref modId, ref modName, ref modVersion);
 
-            var folderName = ResolveArchiveFolderName(directoryName, fileStem, modId, isSpecialManifestFile);
-            if (string.IsNullOrWhiteSpace(folderName))
+            var archiveFolderName = ResolveArchiveFolderName(directoryName, fileStem, modId, isSpecialManifestFile);
+            if (string.IsNullOrWhiteSpace(archiveFolderName))
+            {
+                return false;
+            }
+
+            var installFolderName = modId.Trim();
+            if (string.IsNullOrWhiteSpace(installFolderName))
             {
                 return false;
             }
 
             var extractFullDirectory = manifestCountInDirectory == 1 &&
-                (!string.IsNullOrEmpty(directoryPath) || isSpecialManifestFile);
+                (!string.IsNullOrEmpty(directoryPath) || isSpecialManifestFile || totalManifestCount == 1);
 
             var sourceEntries = extractFullDirectory
                 ? GetArchiveDirectoryEntries(archiveEntries, directoryPath)
@@ -1716,10 +2041,11 @@ internal sealed class ModManagerForm : Form
                 modId,
                 modName,
                 modVersion,
-                folderName,
+                archiveFolderName,
+                installFolderName,
                 entryPath,
                 segments.Length - 1,
-                extractFullDirectory ? directoryPath + "/" : string.Empty,
+                extractFullDirectory && !string.IsNullOrEmpty(directoryPath) ? directoryPath + "/" : string.Empty,
                 extractFullDirectory,
                 sourceEntries);
             return true;
@@ -1733,7 +2059,7 @@ internal sealed class ModManagerForm : Form
     private static string ExtractArchiveToTemporaryFolder(string archivePath, ArchiveInstallPlan installPlan)
     {
         var extractionRoot = Path.Combine(Path.GetTempPath(), "sts2-mod-manager", Guid.NewGuid().ToString("N"));
-        var destinationRoot = Path.Combine(extractionRoot, installPlan.FolderName);
+        var destinationRoot = Path.Combine(extractionRoot, installPlan.InstallFolderName);
         Directory.CreateDirectory(destinationRoot);
         var selectedEntries = new HashSet<string>(installPlan.SourceEntries, StringComparer.OrdinalIgnoreCase);
 
@@ -1748,7 +2074,11 @@ internal sealed class ModManagerForm : Form
 
             if (installPlan.ExtractFullDirectory)
             {
-                entryPath = entryPath.Substring(installPlan.RootPrefix.Length);
+                if (!string.IsNullOrEmpty(installPlan.RootPrefix))
+                {
+                    entryPath = entryPath.Substring(installPlan.RootPrefix.Length);
+                }
+
                 if (string.IsNullOrEmpty(entryPath))
                 {
                     continue;
@@ -1805,7 +2135,6 @@ internal sealed class ModManagerForm : Form
         if (string.IsNullOrEmpty(directoryPath))
         {
             return archiveEntries
-                .Where(candidate => string.IsNullOrEmpty(GetArchiveDirectory(candidate.NormalizedPath)))
                 .Select(candidate => candidate.NormalizedPath)
                 .ToArray();
         }
@@ -2229,6 +2558,7 @@ internal sealed class ConfigPage : UserControl
     private readonly CheckBox noModsCheckBox;
     private readonly TextBox connectLobbyTextBox;
     private readonly TextBox extraLaunchArgumentsTextBox;
+    private readonly CheckBox splitModListCheckBox;
 
     public ConfigPage(
         UiText text,
@@ -2243,11 +2573,14 @@ internal sealed class ConfigPage : UserControl
         this.applyConfiguration = applyConfiguration;
         this.setStatus = setStatus;
 
+        AutoScroll = true;
         Dock = DockStyle.Fill;
 
         var gamePathGroup = new GroupBox
         {
-            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Top,
             Text = text.GamePathGroupTitle
         };
         var currentGamePathLabel = new Label
@@ -2300,8 +2633,10 @@ internal sealed class ConfigPage : UserControl
 
         var gamePathLayout = new TableLayoutPanel
         {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 3,
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Top,
             Padding = new Padding(12),
             RowCount = 4
         };
@@ -2323,7 +2658,9 @@ internal sealed class ConfigPage : UserControl
 
         var generalGroup = new GroupBox
         {
-            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Top,
             Text = text.GeneralSettingsGroupTitle
         };
         var disabledFolderLabel = new Label
@@ -2364,15 +2701,26 @@ internal sealed class ConfigPage : UserControl
         languageComboBox.Items.AddRange(languageOptions.Cast<object>().ToArray());
         languageComboBox.SelectedItem = languageOptions.First(option => option.Language == currentConfig.Language);
 
+        splitModListCheckBox = new CheckBox
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.SplitModListLabel,
+            Checked = currentConfig.SplitModList
+        };
+
         var generalLayout = new TableLayoutPanel
         {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 2,
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Top,
             Padding = new Padding(12),
-            RowCount = 4
+            RowCount = 5
         };
         generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -2382,11 +2730,15 @@ internal sealed class ConfigPage : UserControl
         generalLayout.Controls.Add(disabledFolderHintLabel, 1, 1);
         generalLayout.Controls.Add(languageLabel, 0, 2);
         generalLayout.Controls.Add(languageComboBox, 1, 2);
+        generalLayout.Controls.Add(splitModListCheckBox, 0, 3);
+        generalLayout.SetColumnSpan(splitModListCheckBox, 2);
         generalGroup.Controls.Add(generalLayout);
 
         var launchGroup = new GroupBox
         {
-            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Top,
             Text = text.LaunchSettingsGroupTitle
         };
         var launchModeLabel = new Label
@@ -2598,8 +2950,10 @@ internal sealed class ConfigPage : UserControl
 
         var launchLayout = new TableLayoutPanel
         {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 4,
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Top,
             Padding = new Padding(12),
             RowCount = 7
         };
@@ -2649,7 +3003,8 @@ internal sealed class ConfigPage : UserControl
                 disabledFolderTextBox.Text.Trim(),
                 ((LanguageOption)languageComboBox.SelectedItem!).Language,
                 ((LaunchModeOption)launchModeComboBox.SelectedItem!).LaunchMode,
-                BuildLaunchArguments()));
+                BuildLaunchArguments(),
+                splitModListCheckBox.Checked));
         };
 
         var buttonPanel = new FlowLayoutPanel
@@ -2664,8 +3019,10 @@ internal sealed class ConfigPage : UserControl
 
         var mainLayout = new TableLayoutPanel
         {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 1,
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Top,
             Padding = new Padding(12),
             RowCount = 4
         };
@@ -3509,7 +3866,8 @@ internal sealed record ArchiveInstallPlan(
     string Id,
     string Name,
     string? Version,
-    string FolderName,
+    string ArchiveFolderName,
+    string InstallFolderName,
     string EntryPath,
     int ManifestDepth,
     string RootPrefix,
@@ -3525,14 +3883,16 @@ internal sealed record ModManagerConfig(
     string DisabledDirectoryName,
     AppLanguage Language,
     LaunchMode LaunchMode,
-    string LaunchArguments);
+    string LaunchArguments,
+    bool SplitModList = true);
 
 internal sealed record AppSettings(
     string DisabledDirectoryName,
     string? LanguageCode,
     string? GamePath,
     LaunchMode LaunchMode,
-    string? LaunchArguments)
+    string? LaunchArguments,
+    bool SplitModList = true)
 {
     public static AppSettings Default { get; } = new(".mods", null, null, LaunchMode.Steam, null);
 }
@@ -3640,9 +4000,19 @@ internal sealed class UiText
     public string AppTitle => isChinese ? "杀戮尖塔2 模组管理器" : "Slay the Spire 2 Mod Manager";
     public string TitleText => isChinese ? "管理已启用和已禁用的模组，或将 zip 压缩包拖进窗口以安装为禁用状态" : "Manage enabled and disabled mods, or drop a zip archive to install it as disabled";
     public string DisableSelectedButton => isChinese ? "禁用所选 ->" : "Disable selected ->";
-    public string DisableAllButton => isChinese ? "全部禁用 ->" : "Disable all ->";
+    public string DisableAllButton => isChinese ? "全部禁用" : "Disable all";
     public string EnableSelectedButton => isChinese ? "<- 启用所选" : "<- Enable selected";
-    public string EnableAllButton => isChinese ? "<- 全部启用" : "<- Enable all";
+    public string EnableAllButton => isChinese ? "全部启用" : "Enable all";
+    public string ExportButton => isChinese ? "导出..." : "Export...";
+    public string DisableModButton => isChinese ? "禁用" : "Disable";
+    public string EnableModButton => isChinese ? "启用" : "Enable";
+    public string NoModsFoundLabel => isChinese ? "未找到任何模组" : "No mods found";
+    public string SplitModListLabel => isChinese ? "将已启用和已禁用的模组分开显示" : "Show enabled and disabled mods in separate sections";
+
+    public string AllModsGroup(int count)
+    {
+        return isChinese ? $"全部模组 ({count})" : $"All mods ({count})";
+    }
     public string ModsPageButton => isChinese ? "模组" : "Mods";
     public string SavesPageButton => isChinese ? "存档" : "Saves";
     public string ConfigPageButton => isChinese ? "配置" : "Config";
@@ -3656,12 +4026,15 @@ internal sealed class UiText
     public string VersionColumn => isChinese ? "版本" : "Version";
     public string FolderColumn => isChinese ? "文件夹" : "Folder";
     public string ArchiveImportTitle => isChinese ? "导入压缩包" : "Archive Import";
+    public string ExportArchiveDialogTitle => isChinese ? "导出模组压缩包" : "Export Mods Archive";
+    public string ExportArchiveFilter => isChinese ? "Zip 压缩包 (*.zip)|*.zip" : "Zip archive (*.zip)|*.zip";
     public string ReloadedModListStatus => isChinese ? "已重新加载模组列表。" : "Reloaded mod list.";
     public string GameNotFoundTitle => isChinese ? "未找到游戏" : "Game Not Found";
     public string LoadErrorTitle => isChinese ? "加载错误" : "Load Error";
     public string SelectedModNotResolvedStatus => isChinese ? "无法解析当前选中的模组。" : "The selected mod could not be resolved.";
     public string MoveSkippedTitle => isChinese ? "已跳过移动" : "Move Skipped";
     public string MoveErrorTitle => isChinese ? "移动错误" : "Move Error";
+    public string ExportFailedTitle => isChinese ? "导出失败" : "Export Failed";
     public string OpenFolderErrorTitle => isChinese ? "打开文件夹失败" : "Open Folder Failed";
     public string NoFilesProvidedStatus => isChinese ? "未提供任何文件。" : "No files were provided.";
     public string DisabledFolderMatchesModsMessage => isChinese ? "禁用模组目录不能与启用模组目录相同。" : "The disabled mods folder cannot be the same as the enabled mods folder.";
@@ -3799,6 +4172,9 @@ internal sealed class UiText
     }
 
     public string SelectModFolderStatus => isChinese ? "请选择一个模组以打开其文件夹。" : "Select a mod to open its folder.";
+    public string SelectSingleModFolderStatus => isChinese ? "一次只能打开一个模组文件夹。" : "Select exactly one mod to open its folder.";
+    public string SelectModsExportStatus => isChinese ? "请选择一个或多个模组以导出。" : "Select one or more mods to export.";
+    public string ExportCanceledStatus => isChinese ? "已取消导出模组。" : "Canceled mod export.";
 
     public string GameRestartFailedStatus(string message)
     {
@@ -3900,6 +4276,25 @@ internal sealed class UiText
     public string OpenFolderFailedStatus(string message)
     {
         return isChinese ? $"打开文件夹失败: {message}" : $"Failed to open folder: {message}";
+    }
+
+    public string ExportCompletedStatus(int count, string path)
+    {
+        return isChinese
+            ? $"已将 {count} 个模组导出到 {path}。"
+            : $"Exported {count} mod(s) to {path}.";
+    }
+
+    public string ExportCompletedMessage(int count, string path)
+    {
+        return isChinese
+            ? $"已将 {count} 个模组导出到:{Environment.NewLine}{path}"
+            : $"Exported {count} mod(s) to:{Environment.NewLine}{path}";
+    }
+
+    public string ExportFailedStatus(string message)
+    {
+        return isChinese ? $"导出模组失败: {message}" : $"Failed to export mods: {message}";
     }
 
     public string ModTooltip(string id, string name, string version, string folderName)
@@ -4054,11 +4449,22 @@ internal sealed class UiText
             : $"{archiveFileName}: target folder {folderName} already exists with a different mod id.";
     }
 
-    public string ArchiveInstalled(string archiveFileName, string modId, string disabledDirectoryName)
+    public string ArchiveInstalled(
+        string archiveFileName,
+        string modId,
+        string disabledDirectoryName,
+        string archiveFolderName,
+        string installFolderName)
     {
+        var renameHint = string.Equals(archiveFolderName, installFolderName, StringComparison.OrdinalIgnoreCase)
+            ? string.Empty
+            : isChinese
+                ? $" 已将文件夹名从 {archiveFolderName} 改为 {installFolderName} 以匹配模组 ID。"
+                : $" Renamed folder from {archiveFolderName} to {installFolderName} to match the mod id.";
+
         return isChinese
-            ? $"{archiveFileName}: 已将 {modId} 安装到 {disabledDirectoryName}。"
-            : $"{archiveFileName}: installed {modId} to {disabledDirectoryName}.";
+            ? $"{archiveFileName}: 已将 {modId} 安装到 {disabledDirectoryName}。{renameHint}"
+            : $"{archiveFileName}: installed {modId} to {disabledDirectoryName}.{renameHint}";
     }
 
     public string ArchiveInstallFailed(string archiveFileName, string message)
