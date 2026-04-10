@@ -27,7 +27,7 @@ jobs:
         shell: cmd
         env:
           STS2_MODMANAGER_NONINTERACTIVE: "1"
-        run: STS2ModManager.build.cmd all
+        run: STS2ModManager.build.cmd all ${{ github.ref_name }}
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2.6.1

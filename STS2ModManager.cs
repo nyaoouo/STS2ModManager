@@ -10,6 +10,12 @@
 //    Fields                    Form state: directories, UI controls, selection
 //    Constructor               Full UI layout (toolbar, card panel, nav, status)
 //    Page management           ShowPage, RebuildPages, UpdateNavigationButtons
+//    Version/update check      HandleShown, CheckForUpdatesOnStartupAsync,
+//                              PromptForUpdate, OpenReleasePage,
+//                              TryGetLatestReleaseInfoAsync,
+//                              TryGetLatestReleaseInfoFromApiAsync,
+//                              TryGetLatestReleaseInfoFromReleasePageAsync,
+//                              GetBuildVersion, TryCompareVersions
 //    Localization apply        ApplyLocalizedText
 //    Mod card UI               SyncCardWidths, CreateSectionHeader,
 //                              CreateModCard, SelectCard
@@ -66,11 +72,13 @@
 //    ModManagerJsonContext      Source-generation context for AppSettings JSON
 //    OperationResult           success + message pair
 //    ModMoveResult             ModMoveOutcome + message pair
+//    LatestReleaseInfo         Remote release version + page URL
 //    LanguageOption            ComboBox display wrapper for AppLanguage
 //    LaunchModeOption          ComboBox display wrapper for LaunchMode
 //
 //  Enums
 //    ModMoveOutcome            Changed / Unchanged / Failed
+//    UpdatePromptChoice        UpdateNow / RemindLater / Skip / NeverCheck
 //    ConflictChoice            KeepIncoming / KeepExisting / Cancel
 //    AppLanguage               English / ChineseSimplified
 //    LaunchMode                Steam / Direct
@@ -88,11 +96,15 @@ using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Globalization;
+using System.Reflection;
 using System.Runtime.Versioning;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 using System.Text.Json.Serialization;
@@ -115,10 +127,16 @@ internal sealed class ModManagerForm : Form
     private const string SteamExecutableName = "steam.exe";
     private const int SlayTheSpire2AppId = 2868840;
     private const string ModManifestFileName = "mod_manifest.json";
+    private const string LatestReleaseApiUrl = "https://api.github.com/repos/nyaoouo/STS2ModManager/releases/latest";
+    private const string LatestReleaseUrl = "https://github.com/nyaoouo/STS2ModManager/releases/latest";
+    private const string ReleasesPageUrl = "https://github.com/nyaoouo/STS2ModManager/releases";
+    private static readonly TimeSpan UpdateCheckTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan UpdateReminderDelay = TimeSpan.FromDays(1);
 
     private string gameDirectory;
     private string modsDirectory;
     private readonly string settingsFilePath;
+    private readonly string buildVersion;
 
     private string? configuredGamePath;
     private string disabledDirectoryName;
@@ -127,6 +145,9 @@ internal sealed class ModManagerForm : Form
     private LaunchMode launchMode;
     private string launchArguments;
     private bool splitModList;
+    private bool checkForUpdates;
+    private string? skippedUpdateVersion;
+    private DateTime? updateRemindAfterUtc;
     private UiText text;
 
     private readonly Panel cardScrollPanel;
@@ -176,6 +197,10 @@ internal sealed class ModManagerForm : Form
         launchMode = settings.LaunchMode;
         launchArguments = settings.LaunchArguments?.Trim() ?? string.Empty;
         splitModList = settings.SplitModList;
+        checkForUpdates = settings.CheckForUpdates;
+        skippedUpdateVersion = NormalizeStoredVersion(settings.SkippedUpdateVersion);
+        updateRemindAfterUtc = NormalizeUtc(settings.UpdateRemindAfterUtc);
+        buildVersion = GetBuildVersion();
         text = new UiText(language);
 
         try
@@ -362,16 +387,355 @@ internal sealed class ModManagerForm : Form
         ReloadLists(text.ReadyStatus(disabledDirectoryName));
     }
 
-    private void HandleShown(object? sender, EventArgs eventArgs)
+    private async void HandleShown(object? sender, EventArgs eventArgs)
     {
         Shown -= HandleShown;
 
-        if (startupArchivePaths.Length == 0)
+        if (startupArchivePaths.Length > 0)
+        {
+            InstallArchives(startupArchivePaths, text.ArchiveImportTitle);
+        }
+
+        await CheckForUpdatesOnStartupAsync();
+    }
+
+    private async Task CheckForUpdatesOnStartupAsync()
+    {
+        if (!checkForUpdates || IsDevelopmentBuildVersion(buildVersion))
         {
             return;
         }
 
-        InstallArchives(startupArchivePaths, text.ArchiveImportTitle);
+        if (updateRemindAfterUtc.HasValue && updateRemindAfterUtc.Value > DateTime.UtcNow)
+        {
+            return;
+        }
+
+        LatestReleaseInfo? latestRelease;
+        try
+        {
+            using var cancellationSource = new CancellationTokenSource(UpdateCheckTimeout);
+            latestRelease = await TryGetLatestReleaseInfoAsync(cancellationSource.Token);
+        }
+        catch (HttpRequestException)
+        {
+            latestRelease = null;
+        }
+        catch (OperationCanceledException)
+        {
+            latestRelease = null;
+        }
+
+        if (latestRelease is null)
+        {
+            SetStatus(text.UpdateCheckUnavailableStatus);
+            return;
+        }
+
+        if (VersionsMatch(skippedUpdateVersion, latestRelease.Version))
+        {
+            return;
+        }
+
+        if (!TryCompareVersions(buildVersion, latestRelease.Version, out var comparisonResult) || comparisonResult >= 0)
+        {
+            return;
+        }
+
+        var choice = PromptForUpdate(latestRelease);
+        switch (choice)
+        {
+            case UpdatePromptChoice.UpdateNow:
+                skippedUpdateVersion = null;
+                updateRemindAfterUtc = null;
+                SaveSettings(CurrentSettings());
+                try
+                {
+                    OpenReleasePage(latestRelease.ReleasePageUrl);
+                    SetStatus(text.UpdatePageOpenedStatus(latestRelease.Version));
+                }
+                catch (Exception exception)
+                {
+                    MessageBox.Show(
+                        text.OpenReleasePageFailedMessage(exception.Message),
+                        text.UpdateFailedTitle,
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                    SetStatus(text.UpdateOpenFailedStatus(exception.Message));
+                }
+                break;
+
+            case UpdatePromptChoice.RemindLater:
+                skippedUpdateVersion = null;
+                updateRemindAfterUtc = DateTime.UtcNow.Add(UpdateReminderDelay);
+                SaveSettings(CurrentSettings());
+                SetStatus(text.UpdateReminderScheduledStatus(latestRelease.Version));
+                break;
+
+            case UpdatePromptChoice.SkipThisVersion:
+                skippedUpdateVersion = latestRelease.Version;
+                updateRemindAfterUtc = null;
+                SaveSettings(CurrentSettings());
+                SetStatus(text.UpdateSkippedStatus(latestRelease.Version));
+                break;
+
+            case UpdatePromptChoice.NeverCheck:
+                checkForUpdates = false;
+                skippedUpdateVersion = latestRelease.Version;
+                updateRemindAfterUtc = null;
+                SaveSettings(CurrentSettings());
+                SetStatus(text.UpdateChecksDisabledStatus);
+                break;
+        }
+    }
+
+    private UpdatePromptChoice PromptForUpdate(LatestReleaseInfo latestRelease)
+    {
+        using var dialog = new Form
+        {
+            Text = text.UpdateAvailableTitle,
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(560, 220),
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ShowInTaskbar = false
+        };
+
+        var messageBox = new TextBox
+        {
+            BackColor = SystemColors.Control,
+            BorderStyle = BorderStyle.None,
+            Dock = DockStyle.Fill,
+            Multiline = true,
+            ReadOnly = true,
+            TabStop = false,
+            Text = text.UpdateAvailableMessage(buildVersion, latestRelease.Version)
+        };
+
+        var buttonPanel = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false
+        };
+
+        var updateButton = new Button { AutoSize = true, DialogResult = DialogResult.Yes, Text = text.UpdateNowButton };
+        var remindButton = new Button { AutoSize = true, DialogResult = DialogResult.Cancel, Text = text.RemindLaterButton };
+        var skipButton = new Button { AutoSize = true, DialogResult = DialogResult.Ignore, Text = text.SkipThisVersionButton };
+        var neverCheckButton = new Button { AutoSize = true, DialogResult = DialogResult.No, Text = text.NeverCheckButton };
+        buttonPanel.Controls.Add(updateButton);
+        buttonPanel.Controls.Add(remindButton);
+        buttonPanel.Controls.Add(skipButton);
+        buttonPanel.Controls.Add(neverCheckButton);
+
+        var layout = new TableLayoutPanel
+        {
+            ColumnCount = 1,
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12),
+            RowCount = 2
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.Controls.Add(messageBox, 0, 0);
+        layout.Controls.Add(buttonPanel, 0, 1);
+
+        dialog.Controls.Add(layout);
+        dialog.AcceptButton = updateButton;
+        dialog.CancelButton = remindButton;
+
+        return dialog.ShowDialog(this) switch
+        {
+            DialogResult.Yes => UpdatePromptChoice.UpdateNow,
+            DialogResult.Ignore => UpdatePromptChoice.SkipThisVersion,
+            DialogResult.No => UpdatePromptChoice.NeverCheck,
+            _ => UpdatePromptChoice.RemindLater
+        };
+    }
+
+    private void OpenReleasePage(string releasePageUrl)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = string.IsNullOrWhiteSpace(releasePageUrl) ? ReleasesPageUrl : releasePageUrl,
+            UseShellExecute = true
+        };
+
+        Process.Start(startInfo);
+    }
+
+    private static async Task<LatestReleaseInfo?> TryGetLatestReleaseInfoAsync(CancellationToken cancellationToken)
+    {
+        using var client = new HttpClient();
+        client.DefaultRequestHeaders.UserAgent.ParseAdd($"STS2ModManager/{GetBuildVersion()}");
+        client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+
+        var latestRelease = await TryGetLatestReleaseInfoFromApiAsync(client, cancellationToken);
+        if (latestRelease is not null)
+        {
+            return latestRelease;
+        }
+
+        return await TryGetLatestReleaseInfoFromReleasePageAsync(client, cancellationToken);
+    }
+
+    private static async Task<LatestReleaseInfo?> TryGetLatestReleaseInfoFromApiAsync(HttpClient client, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, LatestReleaseApiUrl);
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("tag_name", out var tagNameElement) || tagNameElement.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        var version = NormalizeStoredVersion(tagNameElement.GetString());
+        if (string.IsNullOrWhiteSpace(version))
+        {
+            return null;
+        }
+
+        var releaseUrl = root.TryGetProperty("html_url", out var htmlUrlElement) && htmlUrlElement.ValueKind == JsonValueKind.String
+            ? htmlUrlElement.GetString()
+            : null;
+        if (string.IsNullOrWhiteSpace(releaseUrl))
+        {
+            releaseUrl = ReleasesPageUrl;
+        }
+
+        return new LatestReleaseInfo(version, releaseUrl);
+    }
+
+    private static async Task<LatestReleaseInfo?> TryGetLatestReleaseInfoFromReleasePageAsync(HttpClient client, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, LatestReleaseUrl);
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        var finalUri = response.RequestMessage?.RequestUri;
+        if (finalUri is null ||
+            !finalUri.AbsolutePath.Contains("/releases/tag/", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var tag = finalUri.Segments.LastOrDefault();
+        var version = NormalizeStoredVersion(tag is null ? null : Uri.UnescapeDataString(tag));
+        if (string.IsNullOrWhiteSpace(version))
+        {
+            return null;
+        }
+
+        return new LatestReleaseInfo(version, finalUri.AbsoluteUri);
+    }
+
+    private static string GetBuildVersion()
+    {
+        var attribute = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>();
+        var version = attribute?.InformationalVersion;
+        return string.IsNullOrWhiteSpace(version) ? "dev" : version.Trim();
+    }
+
+    private static bool IsDevelopmentBuildVersion(string? version)
+    {
+        return string.IsNullOrWhiteSpace(version) ||
+            string.Equals(version.Trim(), "dev", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? NormalizeStoredVersion(string? version)
+    {
+        if (string.IsNullOrWhiteSpace(version))
+        {
+            return null;
+        }
+
+        var trimmed = version.Trim();
+        return trimmed.StartsWith("v", StringComparison.OrdinalIgnoreCase)
+            ? trimmed.Substring(1)
+            : trimmed;
+    }
+
+    private static DateTime? NormalizeUtc(DateTime? value)
+    {
+        if (!value.HasValue)
+        {
+            return null;
+        }
+
+        var normalized = value.Value.Kind == DateTimeKind.Unspecified
+            ? DateTime.SpecifyKind(value.Value, DateTimeKind.Utc)
+            : value.Value;
+        return normalized.ToUniversalTime();
+    }
+
+    private static bool VersionsMatch(string? left, string? right)
+    {
+        var normalizedLeft = NormalizeStoredVersion(left);
+        var normalizedRight = NormalizeStoredVersion(right);
+        return !string.IsNullOrWhiteSpace(normalizedLeft) &&
+            string.Equals(normalizedLeft, normalizedRight, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryCompareVersions(string currentVersionText, string latestVersionText, out int comparisonResult)
+    {
+        comparisonResult = 0;
+        if (!TryParseComparableVersion(currentVersionText, out var currentVersion) ||
+            !TryParseComparableVersion(latestVersionText, out var latestVersion))
+        {
+            return false;
+        }
+
+        comparisonResult = currentVersion.CompareTo(latestVersion);
+        return true;
+    }
+
+    private static bool TryParseComparableVersion(string versionText, out Version version)
+    {
+        version = new Version(0, 0, 0, 0);
+        if (IsDevelopmentBuildVersion(versionText))
+        {
+            return false;
+        }
+
+        var normalizedVersion = NormalizeStoredVersion(versionText);
+        if (string.IsNullOrWhiteSpace(normalizedVersion))
+        {
+            return false;
+        }
+
+        var match = Regex.Match(normalizedVersion, @"^\d+(?:\.\d+){0,3}");
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        var parts = match.Value.Split('.').ToList();
+        while (parts.Count < 4)
+        {
+            parts.Add("0");
+        }
+
+        if (!Version.TryParse(string.Join(".", parts), out var parsedVersion) || parsedVersion is null)
+        {
+            return false;
+        }
+
+        version = parsedVersion;
+        return true;
     }
 
     private void RebuildPages()
@@ -1692,8 +2056,19 @@ internal sealed class ModManagerForm : Form
                 ? settings.LaunchMode
                 : AppSettings.Default.LaunchMode;
             var savedLaunchArguments = settings.LaunchArguments?.Trim() ?? string.Empty;
+            var savedSkippedUpdateVersion = NormalizeStoredVersion(settings.SkippedUpdateVersion);
+            var savedUpdateRemindAfterUtc = NormalizeUtc(settings.UpdateRemindAfterUtc);
 
-            return new AppSettings(disabledDirectoryValue, languageCode, gamePath, savedLaunchMode, savedLaunchArguments, settings.SplitModList);
+            return new AppSettings(
+                disabledDirectoryValue,
+                languageCode,
+                gamePath,
+                savedLaunchMode,
+                savedLaunchArguments,
+                settings.SplitModList,
+                settings.CheckForUpdates,
+                savedSkippedUpdateVersion,
+                savedUpdateRemindAfterUtc);
         }
         catch
         {
@@ -1715,7 +2090,10 @@ internal sealed class ModManagerForm : Form
             configuredGamePath,
             launchMode,
             launchArguments,
-            splitModList);
+            splitModList,
+            checkForUpdates,
+            skippedUpdateVersion,
+            updateRemindAfterUtc);
     }
 
     private bool TryValidateDirectoryName(string value, out string errorMessage)
@@ -3892,7 +4270,10 @@ internal sealed record AppSettings(
     string? GamePath,
     LaunchMode LaunchMode,
     string? LaunchArguments,
-    bool SplitModList = true)
+    bool SplitModList = true,
+    bool CheckForUpdates = true,
+    string? SkippedUpdateVersion = null,
+    DateTime? UpdateRemindAfterUtc = null)
 {
     public static AppSettings Default { get; } = new(".mods", null, null, LaunchMode.Steam, null);
 }
@@ -3907,11 +4288,21 @@ internal sealed record OperationResult(bool RefreshRequired, string Message);
 
 internal sealed record ModMoveResult(ModMoveOutcome Outcome, string Message);
 
+internal sealed record LatestReleaseInfo(string Version, string ReleasePageUrl);
+
 internal enum ModMoveOutcome
 {
     Changed,
     Unchanged,
     Failed
+}
+
+internal enum UpdatePromptChoice
+{
+    UpdateNow,
+    RemindLater,
+    SkipThisVersion,
+    NeverCheck
 }
 
 internal sealed record LanguageOption(AppLanguage Language, string DisplayName)
@@ -4040,6 +4431,11 @@ internal sealed class UiText
     public string DisabledFolderMatchesModsMessage => isChinese ? "禁用模组目录不能与启用模组目录相同。" : "The disabled mods folder cannot be the same as the enabled mods folder.";
     public string InvalidDirectoryTitle => isChinese ? "无效目录" : "Invalid Directory";
     public string UpdateFailedTitle => isChinese ? "更新失败" : "Update Failed";
+    public string UpdateAvailableTitle => isChinese ? "发现新版本" : "Update Available";
+    public string UpdateNowButton => isChinese ? "立即更新" : "Update Now";
+    public string RemindLaterButton => isChinese ? "稍后提醒" : "Remind Later";
+    public string SkipThisVersionButton => isChinese ? "跳过此版本" : "Skip This Version";
+    public string NeverCheckButton => isChinese ? "不再检查" : "Never Check";
     public string ConfigurationDialogTitle => isChinese ? "配置" : "Configuration";
     public string ConfigurationUpdatedStatus => isChinese ? "配置已更新。" : "Configuration updated.";
     public string GamePathGroupTitle => isChinese ? "游戏路径" : "Game Path";
@@ -4155,6 +4551,44 @@ internal sealed class UiText
             ? $"就绪。将 zip 压缩包拖到窗口任意位置即可安装到 {disabledDirectoryName}。"
             : $"Ready. Drop a zip archive anywhere in the window to install it into {disabledDirectoryName}.";
     }
+
+    public string UpdateAvailableMessage(string currentVersion, string latestVersion)
+    {
+        return isChinese
+            ? $"当前版本: {currentVersion}{Environment.NewLine}最新版本: {latestVersion}{Environment.NewLine}{Environment.NewLine}是否打开 GitHub 发布页面下载更新?"
+            : $"Current version: {currentVersion}{Environment.NewLine}Latest version: {latestVersion}{Environment.NewLine}{Environment.NewLine}Open the GitHub releases page to download the update?";
+    }
+
+    public string UpdateCheckUnavailableStatus => isChinese
+        ? "无法连接 GitHub 检查更新。在某些地区这可能是网络限制导致的；稍后可手动查看发布页。"
+        : "Could not reach GitHub to check for updates. In some regions this can fail because of network restrictions; you can check the releases page manually later.";
+
+    public string UpdatePageOpenedStatus(string version)
+    {
+        return isChinese ? $"已打开版本 {version} 的发布页。" : $"Opened the release page for version {version}.";
+    }
+
+    public string UpdateOpenFailedStatus(string message)
+    {
+        return isChinese ? $"打开发布页失败: {message}" : $"Failed to open the release page: {message}";
+    }
+
+    public string OpenReleasePageFailedMessage(string message)
+    {
+        return isChinese ? $"无法打开 GitHub 发布页。{Environment.NewLine}{Environment.NewLine}{message}" : $"Could not open the GitHub releases page.{Environment.NewLine}{Environment.NewLine}{message}";
+    }
+
+    public string UpdateReminderScheduledStatus(string version)
+    {
+        return isChinese ? $"稍后会再次提醒版本 {version}。" : $"Will remind you about version {version} later.";
+    }
+
+    public string UpdateSkippedStatus(string version)
+    {
+        return isChinese ? $"将跳过版本 {version} 的提醒。" : $"Will skip update reminders for version {version}.";
+    }
+
+    public string UpdateChecksDisabledStatus => isChinese ? "已关闭自动更新检查。" : "Automatic update checks are disabled.";
 
     public string EnabledGroup(int count)
     {

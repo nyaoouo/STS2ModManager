@@ -14,7 +14,17 @@ if /i "%CI%"=="true" set "NONINTERACTIVE=1"
 if /i "%GITHUB_ACTIONS%"=="true" set "NONINTERACTIVE=1"
 
 set "MODE=%~1"
+set "BUILD_VERSION=%~2"
 if /i "%MODE%"=="" set "MODE=all"
+
+if /i not "%MODE%"=="framework" if /i not "%MODE%"=="default" if /i not "%MODE%"=="aot" if /i not "%MODE%"=="all" (
+    if /i "%BUILD_VERSION%"=="" (
+        set "BUILD_VERSION=%MODE%"
+        set "MODE=all"
+    )
+)
+
+if /i "%BUILD_VERSION%"=="" set "BUILD_VERSION=dev"
 
 where dotnet >nul 2>&1
 if errorlevel 1 (
@@ -28,7 +38,7 @@ if /i "%MODE%"=="default" goto build_framework
 if /i "%MODE%"=="aot" goto build_aot
 if /i "%MODE%"=="all" goto build_all
 
-echo Usage: %~nx0 [framework^|aot^|all]
+echo Usage: %~nx0 [framework^|aot^|all] [version]
 call :maybe_pause
 exit /b 1
 
@@ -91,6 +101,7 @@ set "VARIANT=%~1"
     echo     ^<Nullable^>enable^</Nullable^>
     echo     ^<EnableDefaultCompileItems^>false^</EnableDefaultCompileItems^>
     echo     ^<AssemblyName^>ModManager^</AssemblyName^>
+    echo     ^<InformationalVersion^>%BUILD_VERSION%^</InformationalVersion^>
 )
 
 if /i "%VARIANT%"=="aot" (
