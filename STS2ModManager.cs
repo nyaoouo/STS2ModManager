@@ -148,6 +148,7 @@ internal sealed class ModManagerForm : Form
     private bool checkForUpdates;
     private string? skippedUpdateVersion;
     private DateTime? updateRemindAfterUtc;
+    private string? latestReleaseVersion;
     private UiText text;
 
     private readonly Panel cardScrollPanel;
@@ -428,9 +429,14 @@ internal sealed class ModManagerForm : Form
 
         if (latestRelease is null)
         {
+            latestReleaseVersion = null;
+            configPage?.UpdateVersionInfo(buildVersion, latestReleaseVersion);
             SetStatus(text.UpdateCheckUnavailableStatus);
             return;
         }
+
+        latestReleaseVersion = latestRelease.Version;
+        configPage?.UpdateVersionInfo(buildVersion, latestReleaseVersion);
 
         if (VersionsMatch(skippedUpdateVersion, latestRelease.Version))
         {
@@ -752,6 +758,8 @@ internal sealed class ModManagerForm : Form
             text,
             CurrentConfiguration(),
             gameDirectory,
+            buildVersion,
+            latestReleaseVersion,
             () => FindGameDirectory(AppContext.BaseDirectory),
             ApplyConfiguration,
             SetStatus)
@@ -2922,6 +2930,8 @@ internal sealed class ConfigPage : UserControl
     private readonly Func<string> autoDetectGameDirectory;
     private readonly Action<ModManagerConfig> applyConfiguration;
     private readonly Action<string> setStatus;
+    private readonly Label currentVersionValueLabel;
+    private readonly Label latestVersionValueLabel;
     private readonly TextBox gamePathTextBox;
     private readonly TextBox disabledFolderTextBox;
     private readonly ComboBox languageComboBox;
@@ -2942,6 +2952,8 @@ internal sealed class ConfigPage : UserControl
         UiText text,
         ModManagerConfig currentConfig,
         string resolvedGameDirectory,
+        string currentVersion,
+        string? latestVersion,
         Func<string> autoDetectGameDirectory,
         Action<ModManagerConfig> applyConfiguration,
         Action<string> setStatus)
@@ -3087,6 +3099,31 @@ internal sealed class ConfigPage : UserControl
             Checked = currentConfig.SplitModList
         };
 
+        var currentVersionLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.CurrentVersionLabel
+        };
+        currentVersionValueLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = FormatVersionValue(currentVersion)
+        };
+        var latestVersionLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = text.LatestVersionLabel
+        };
+        latestVersionValueLabel = new Label
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            Text = FormatVersionValue(latestVersion)
+        };
+
         var generalLayout = new TableLayoutPanel
         {
             AutoSize = true,
@@ -3094,10 +3131,12 @@ internal sealed class ConfigPage : UserControl
             ColumnCount = 2,
             Dock = DockStyle.Top,
             Padding = new Padding(12),
-            RowCount = 5
+            RowCount = 7
         };
         generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -3110,6 +3149,10 @@ internal sealed class ConfigPage : UserControl
         generalLayout.Controls.Add(languageComboBox, 1, 2);
         generalLayout.Controls.Add(splitModListCheckBox, 0, 3);
         generalLayout.SetColumnSpan(splitModListCheckBox, 2);
+        generalLayout.Controls.Add(currentVersionLabel, 0, 4);
+        generalLayout.Controls.Add(currentVersionValueLabel, 1, 4);
+        generalLayout.Controls.Add(latestVersionLabel, 0, 5);
+        generalLayout.Controls.Add(latestVersionValueLabel, 1, 5);
         generalGroup.Controls.Add(generalLayout);
 
         var launchGroup = new GroupBox
@@ -3415,6 +3458,17 @@ internal sealed class ConfigPage : UserControl
         mainLayout.Controls.Add(buttonPanel, 0, 3);
 
         Controls.Add(mainLayout);
+    }
+
+    public void UpdateVersionInfo(string currentVersion, string? latestVersion)
+    {
+        currentVersionValueLabel.Text = FormatVersionValue(currentVersion);
+        latestVersionValueLabel.Text = FormatVersionValue(latestVersion);
+    }
+
+    private string FormatVersionValue(string? version)
+    {
+        return string.IsNullOrWhiteSpace(version) ? text.UnknownVersionLabel : version.Trim();
     }
 
     private void BrowseForGamePath()
@@ -4466,6 +4520,8 @@ internal sealed class UiText
     public string DisabledFolderHint => isChinese ? "示例: .mods, disabled-mods, archived-mods" : "Examples: .mods, disabled-mods, archived-mods";
     public string DisabledFolderNameLabel => isChinese ? "禁用目录名:" : "Disabled folder name:";
     public string InterfaceLanguageLabel => isChinese ? "界面语言:" : "Interface language:";
+    public string CurrentVersionLabel => isChinese ? "当前版本:" : "Current version:";
+    public string LatestVersionLabel => isChinese ? "最新版本:" : "Latest version:";
     public string SaveButton => isChinese ? "保存" : "Save";
     public string CancelButton => isChinese ? "取消" : "Cancel";
     public string InvalidDirectoryNameTitle => isChinese ? "无效目录名" : "Invalid Directory Name";
