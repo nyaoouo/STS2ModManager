@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>ModManager</AssemblyName>
+    <RootNamespace>STS2ModManager</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Framework-dependent single-file publish (default) -->
+  <PropertyGroup Condition="'$(PublishAot)' != 'true'">
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+
+  <!-- NativeAOT publish (opt-in via -p:PublishAot=true) -->
+  <PropertyGroup Condition="'$(PublishAot)' == 'true'">
+    <PublishTrimmed>true</PublishTrimmed>
+    <SelfContained>true</SelfContained>
+    <_SuppressWinFormsTrimError>true</_SuppressWinFormsTrimError>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MaterialSkin.2" Version="2.3.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="localization\**\*.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="STS2ModManager.App.Localization" />
+  </ItemGroup>
+
+  <!-- Keep MaterialSkin fully in the trimmed output (NuGet package id is MaterialSkin.2 but
+       the shipped assembly is named MaterialSkin). Rooting it avoids reflection/trim issues
+       with the library's resource and designer-style lookups under NativeAOT. -->
+  <ItemGroup Condition="'$(PublishAot)' == 'true'">
+    <TrimmerRootAssembly Include="MaterialSkin" />
+  </ItemGroup>
+
+</Project>

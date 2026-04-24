@@ -23,6 +23,9 @@ jobs:
         with:
           dotnet-version: 9.0.x
 
+      - name: Restore NuGet packages
+        run: dotnet restore STS2ModManager.csproj
+
       - name: Build release artifacts
         shell: cmd
         env:
