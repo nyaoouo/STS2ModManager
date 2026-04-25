@@ -10,6 +10,7 @@ using System.Windows.Forms;
 using MaterialSkin;
 using MaterialSkin.Controls;
 using STS2ModManager.App;
+using STS2ModManager.Dialogs;
 using STS2ModManager.Widgets;
 
 [SupportedOSPlatform("windows")]
@@ -127,33 +128,15 @@ internal sealed class ConfigPage : UserControl
             Hint = loc.Get("game.game_path_label"),
             Text = currentConfig.GamePath ?? string.Empty,
         };
-        var browseButton = new MaterialButton
-        {
-            AutoSize = true,
-            Type = MaterialButton.MaterialButtonType.Outlined,
-            UseAccentColor = false,
-            HighEmphasis = false,
-            Text = loc.Get("config.browse_button"),
-            Margin = new Padding(0, 8, 6, 0),
-        };
-        var autoDetectButton = new MaterialButton
-        {
-            AutoSize = true,
-            Type = MaterialButton.MaterialButtonType.Outlined,
-            UseAccentColor = false,
-            HighEmphasis = false,
-            Text = loc.Get("config.auto_detect_button"),
-            Margin = new Padding(0, 8, 6, 0),
-        };
-        var clearButton = new MaterialButton
-        {
-            AutoSize = true,
-            Type = MaterialButton.MaterialButtonType.Outlined,
-            UseAccentColor = false,
-            HighEmphasis = false,
-            Text = loc.Get("config.clear_button"),
-            Margin = new Padding(0, 8, 0, 0),
-        };
+        var browseButton = WidgetFactory.MakeButton();
+        browseButton.Text = loc.Get("config.browse_button");
+        browseButton.Margin = new Padding(0, 8, 6, 0);
+        var autoDetectButton = WidgetFactory.MakeButton();
+        autoDetectButton.Text = loc.Get("config.auto_detect_button");
+        autoDetectButton.Margin = new Padding(0, 8, 6, 0);
+        var clearButton = WidgetFactory.MakeButton();
+        clearButton.Text = loc.Get("config.clear_button");
+        clearButton.Margin = new Padding(0, 8, 0, 0);
 
         browseButton.Click += (_, _) => BrowseForGamePath();
         autoDetectButton.Click += (_, _) => AutoDetectGamePath();
@@ -538,14 +521,9 @@ internal sealed class ConfigPage : UserControl
         var launchGroup = MakeCard(loc.Get("launch.launch_settings_group_title"), launchBody, cardBack);
 
         // ── Footer (Save) ────────────────────────────────────────────────────
-        var saveButton = new MaterialButton
-        {
-            AutoSize = true,
-            Type = MaterialButton.MaterialButtonType.Contained,
-            UseAccentColor = true,
-            HighEmphasis = true,
-            Text = loc.Get("common.save_button"),
-        };
+        var saveButton = WidgetFactory.MakeButton();
+        saveButton.Text = loc.Get("common.save_button");
+        saveButton.IsHighlight = true;
         saveButton.Click += (_, _) =>
         {
             var retention = 5;
@@ -581,17 +559,37 @@ internal sealed class ConfigPage : UserControl
             ColumnCount = 1,
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             Padding = new Padding(12),
-            RowCount = 4
+            RowCount = 3
         };
         mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         mainLayout.Controls.Add(gamePathGroup, 0, 0);
         mainLayout.Controls.Add(generalGroup, 0, 1);
         mainLayout.Controls.Add(launchGroup, 0, 2);
-        mainLayout.Controls.Add(buttonPanel, 0, 3);
+
+        // Scroll host: holds the mainLayout. Sibling to the pinned footer below
+        // so the Save button stays visible regardless of scroll position.
+        var scrollHost = new Panel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = false,
+            BackColor = Color.Transparent,
+        };
+        scrollHost.Controls.Add(mainLayout);
+
+        // Pinned footer with the Save button (docked at the bottom of the view).
+        buttonPanel.Dock = DockStyle.Fill;
+        var footerPanel = new Panel
+        {
+            Dock = DockStyle.Bottom,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(12, 6, 12, 12),
+            BackColor = cardBack,
+        };
+        footerPanel.Controls.Add(buttonPanel);
 
         // Reduce flicker during scroll: enable double buffering on all layout panels.
         EnableDB(mainLayout);
@@ -602,9 +600,15 @@ internal sealed class ConfigPage : UserControl
         EnableDB(launchBody);
         EnableDB(launchLayout);
         EnableDB(buttonPanel);
+        EnableDB(footerPanel);
+        EnableDB(scrollHost);
 
-        Controls.Add(mainLayout);
-        ThinScrollBarHost.Attach(this, mainLayout, manageContentWidth: true);
+        // Add scrollHost (Fill) before footerPanel (Bottom). WinForms docks the
+        // higher z-order (last-added) control first, so footerPanel takes the
+        // bottom strip and scrollHost fills the remainder.
+        Controls.Add(scrollHost);
+        Controls.Add(footerPanel);
+        ThinScrollBarHost.Attach(scrollHost, mainLayout, manageContentWidth: true);
     }
 
     public void UpdateVersionInfo(string currentVersion, string? latestVersion)
@@ -643,11 +647,11 @@ internal sealed class ConfigPage : UserControl
         }
         catch (Exception exception)
         {
-            MessageBox.Show(
-                LocalizedFormats.GameNotFoundMessage(loc, exception.Message),
+            MessageDialog.Warn(
+                this,
+                loc,
                 loc.Get("game.game_not_found_title"),
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
+                LocalizedFormats.GameNotFoundMessage(loc, exception.Message));
         }
     }
 

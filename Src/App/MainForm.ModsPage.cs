@@ -47,11 +47,11 @@ internal sealed partial class ModManagerForm
         catch (Exception exception)
         {
             SetStatus(loc.Get("mods.load_failed_status", exception.Message));
-            MessageBox.Show(
-                exception.Message,
+            MessageDialog.Error(
+                this,
+                loc,
                 loc.Get("mods.load_error_title"),
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
+                exception.Message);
         }
     }
 
@@ -129,17 +129,9 @@ internal sealed partial class ModManagerForm
 
     private void UpdateFilterChipStyles()
     {
-        void Style(MaterialButton button, bool active)
-        {
-            button.Type = active
-                ? MaterialButton.MaterialButtonType.Contained
-                : MaterialButton.MaterialButtonType.Outlined;
-            button.HighEmphasis = active;
-            button.UseAccentColor = active;
-        }
-        Style(filterAllButton, activeFilter == ModFilter.All);
-        Style(filterEnabledButton, activeFilter == ModFilter.Enabled);
-        Style(filterDisabledButton, activeFilter == ModFilter.Disabled);
+        filterAllButton.IsHighlight      = activeFilter == ModFilter.All;
+        filterEnabledButton.IsHighlight  = activeFilter == ModFilter.Enabled;
+        filterDisabledButton.IsHighlight = activeFilter == ModFilter.Disabled;
     }
 
     private void ToggleMod(ModInfo mod, bool enable)
@@ -174,11 +166,11 @@ internal sealed partial class ModManagerForm
             return;
         }
 
-        if (MessageBox.Show(
-                LocalizedFormats.BulkMovePrompt(loc, operationVerb, mods.Count),
+        if (!MessageDialog.Confirm(
+                this,
+                loc,
                 loc.Get("mods.bulk_move_title"),
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question) != DialogResult.Yes)
+                LocalizedFormats.BulkMovePrompt(loc, operationVerb, mods.Count)))
         {
             SetStatus(LocalizedFormats.BulkMoveCanceledStatus(loc, operationVerb));
             return;
@@ -256,11 +248,11 @@ internal sealed partial class ModManagerForm
         {
             if (showDialogs)
             {
-                MessageBox.Show(
-                    loc.Get("archive.target_folder_already_exists_message", selectedMod.FolderName),
+                MessageDialog.Warn(
+                    this,
+                    loc,
                     loc.Get("mods.move_skipped_title"),
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
+                    loc.Get("archive.target_folder_already_exists_message", selectedMod.FolderName));
             }
 
             return new ModMoveResult(ModMoveOutcome.Unchanged, loc.Get("mods.move_skipped_status", selectedMod.Id));
@@ -275,11 +267,11 @@ internal sealed partial class ModManagerForm
         {
             if (showDialogs)
             {
-                MessageBox.Show(
-                    exception.Message,
+                MessageDialog.Error(
+                    this,
+                    loc,
                     loc.Get("mods.move_error_title"),
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                    exception.Message);
             }
 
             return new ModMoveResult(ModMoveOutcome.Failed, loc.Get("mods.move_failed_status", selectedMod.Id, exception.Message));
@@ -307,11 +299,11 @@ internal sealed partial class ModManagerForm
         {
             var message = loc.Get("mods.mod_folder_missing_message", selectedMod.FullPath);
             SetStatus(loc.Get("common.open_folder_failed_status", message));
-            MessageBox.Show(
-                message,
+            MessageDialog.Warn(
+                this,
+                loc,
                 loc.Get("common.open_folder_error_title"),
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
+                message);
             return;
         }
 
@@ -328,11 +320,11 @@ internal sealed partial class ModManagerForm
         catch (Exception exception)
         {
             SetStatus(loc.Get("common.open_folder_failed_status", exception.Message));
-            MessageBox.Show(
-                exception.Message,
+            MessageDialog.Error(
+                this,
+                loc,
                 loc.Get("common.open_folder_error_title"),
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
+                exception.Message);
         }
     }
 
@@ -371,11 +363,11 @@ internal sealed partial class ModManagerForm
         catch (Exception exception)
         {
             SetStatus(loc.Get("ui.export_failed_status", exception.Message));
-            MessageBox.Show(
-                exception.Message,
+            MessageDialog.Error(
+                this,
+                loc,
                 loc.Get("ui.export_failed_title"),
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
+                exception.Message);
         }
     }
 
@@ -661,10 +653,22 @@ internal sealed partial class ModManagerForm
     private void UpdateButtons()
     {
         var selectedCount = selectedModPaths.Count;
-        disableAllButton.Enabled = enabledModCount > 0;
-        enableAllButton.Enabled = disabledModCount > 0;
-        exportButton.Enabled = selectedCount > 0;
-        openFolderButton.Enabled = selectedCount == 1;
+
+        var disableAllOff = enabledModCount == 0;
+        disableAllButton.LookDisabled = disableAllOff;
+        disableAllButton.Tooltip = disableAllOff ? loc.Get("ui.disable_all_disabled_tooltip") : null;
+
+        var enableAllOff = disabledModCount == 0;
+        enableAllButton.LookDisabled = enableAllOff;
+        enableAllButton.Tooltip = enableAllOff ? loc.Get("ui.enable_all_disabled_tooltip") : null;
+
+        var exportOff = selectedCount == 0;
+        exportButton.LookDisabled = exportOff;
+        exportButton.Tooltip = exportOff ? loc.Get("ui.export_disabled_tooltip") : null;
+
+        var openFolderOff = selectedCount != 1;
+        openFolderButton.LookDisabled = openFolderOff;
+        openFolderButton.Tooltip = openFolderOff ? loc.Get("ui.open_folder_disabled_tooltip") : null;
     }
 
     private bool TryValidateDirectoryName(string value, out string errorMessage)

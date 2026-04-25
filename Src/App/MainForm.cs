@@ -92,21 +92,21 @@ internal sealed partial class ModManagerForm : MaterialForm
     private readonly ThinScrollBar cardScrollBar;
     private readonly FlowLayoutPanel cardPanel;
     private readonly MaterialTextBox2 searchBox;
-    private readonly MaterialButton filterAllButton;
-    private readonly MaterialButton filterEnabledButton;
-    private readonly MaterialButton filterDisabledButton;
+    private readonly LinkButton filterAllButton;
+    private readonly LinkButton filterEnabledButton;
+    private readonly LinkButton filterDisabledButton;
     private readonly Panel dropOverlay;
     private readonly Label dropOverlayLabel;
     private List<ModInfo> cachedEnabledMods = new();
     private List<ModInfo> cachedDisabledMods = new();
     private string activeSearchTerm = string.Empty;
     private ModFilter activeFilter = ModFilter.All;
-    private readonly MaterialButton disableAllButton;
-    private readonly MaterialButton enableAllButton;
-    private readonly MaterialButton exportButton;
-    private readonly MaterialButton openFolderButton;
-    private readonly MaterialButton refreshButton;
-    private readonly MaterialButton restartButton;
+    private readonly LinkButton disableAllButton;
+    private readonly LinkButton enableAllButton;
+    private readonly LinkButton exportButton;
+    private readonly LinkButton openFolderButton;
+    private readonly LinkButton refreshButton;
+    private readonly LinkButton restartButton;
     private readonly MaterialButton windowMinButton;
     private readonly MaterialButton windowMaxButton;
     private readonly MaterialButton windowCloseButton;
@@ -124,7 +124,7 @@ internal sealed partial class ModManagerForm : MaterialForm
     private readonly Label rootLabel;
     private readonly Panel statusBar;
     private readonly Label statusLabel;
-    private readonly MaterialButton infoButton;
+    private readonly LinkButton infoButton;
     private readonly ToolTip pathsTooltip = new() { AutoPopDelay = 15000, InitialDelay = 200, ReshowDelay = 100 };
     private readonly Control modsPage;
 
@@ -172,11 +172,11 @@ internal sealed partial class ModManagerForm : MaterialForm
         }
         catch (Exception exception)
         {
-            MessageBox.Show(
-                LocalizedFormats.GameNotFoundMessage(loc, exception.Message),
+            MessageDialog.Error(
+                this,
+                loc,
                 loc.Get("game.game_not_found_title"),
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
+                LocalizedFormats.GameNotFoundMessage(loc, exception.Message));
             Environment.Exit(1);
             return;
         }
@@ -199,23 +199,18 @@ internal sealed partial class ModManagerForm : MaterialForm
         themeController.EffectiveThemeChanged += () => cardScrollBar.Invalidate();
         cardScrollPanel.Resize += (_, _) => SyncCardWidths();
 
-        disableAllButton = WidgetFactory.MakeButton(MaterialButton.MaterialButtonType.Text);
-        enableAllButton = WidgetFactory.MakeButton(MaterialButton.MaterialButtonType.Text);
-        exportButton = WidgetFactory.MakeButton(MaterialButton.MaterialButtonType.Text);
-        openFolderButton = WidgetFactory.MakeButton(MaterialButton.MaterialButtonType.Text);
-        refreshButton = WidgetFactory.MakeButton(MaterialButton.MaterialButtonType.Text);
-        restartButton = WidgetFactory.MakeButton(MaterialButton.MaterialButtonType.Contained);
-        restartButton.UseAccentColor = true;
-        infoButton = new MaterialButton
+        disableAllButton = WidgetFactory.MakeButton();
+        enableAllButton = WidgetFactory.MakeButton();
+        exportButton = WidgetFactory.MakeButton();
+        openFolderButton = WidgetFactory.MakeButton();
+        refreshButton = WidgetFactory.MakeButton();
+        restartButton = WidgetFactory.MakeButton();
+        restartButton.IsHighlight = true;
+        infoButton = new LinkButton
         {
-            AutoSize = false,
-            Size = new Size(36, 28),
-            Type = MaterialButton.MaterialButtonType.Text,
-            Text = string.Empty,
-            UseAccentColor = false,
-            HighEmphasis = true,
+            AutoSize = true,
+            Text = "\u24D8",
             Margin = new Padding(0),
-            Icon = RenderGlyphIcon("\u24D8"),
         };
 
         searchBox = new MaterialTextBox2
@@ -230,9 +225,9 @@ internal sealed partial class ModManagerForm : MaterialForm
             RefreshCardDisplay();
         };
 
-        filterAllButton = WidgetFactory.MakeButton(MaterialButton.MaterialButtonType.Outlined);
-        filterEnabledButton = WidgetFactory.MakeButton(MaterialButton.MaterialButtonType.Outlined);
-        filterDisabledButton = WidgetFactory.MakeButton(MaterialButton.MaterialButtonType.Outlined);
+        filterAllButton = WidgetFactory.MakeButton();
+        filterEnabledButton = WidgetFactory.MakeButton();
+        filterDisabledButton = WidgetFactory.MakeButton();
         filterAllButton.Click += (_, _) => SetActiveFilter(ModFilter.All);
         filterEnabledButton.Click += (_, _) => SetActiveFilter(ModFilter.Enabled);
         filterDisabledButton.Click += (_, _) => SetActiveFilter(ModFilter.Disabled);
@@ -388,9 +383,17 @@ internal sealed partial class ModManagerForm : MaterialForm
             WrapContents = true
         };
         toolbarPanel.Controls.Add(searchBox);
-        toolbarPanel.Controls.Add(filterAllButton);
-        toolbarPanel.Controls.Add(filterEnabledButton);
-        toolbarPanel.Controls.Add(filterDisabledButton);
+
+        var filterGroup = new LinkButtonGroup
+        {
+            Anchor = AnchorStyles.None,
+            Margin = new Padding(0, 0, 12, 0),
+        };
+        filterGroup.Controls.Add(filterAllButton);
+        filterGroup.Controls.Add(filterEnabledButton);
+        filterGroup.Controls.Add(filterDisabledButton);
+        toolbarPanel.Controls.Add(filterGroup);
+
         toolbarPanel.Controls.Add(enableAllButton);
         toolbarPanel.Controls.Add(disableAllButton);
         toolbarPanel.Controls.Add(exportButton);
@@ -661,7 +664,6 @@ internal sealed partial class ModManagerForm : MaterialForm
         windowMaxButton.NoAccentTextColor = fg;
         windowCloseButton.NoAccentTextColor = fg;
         themeToggleButton.NoAccentTextColor = fg;
-        infoButton.NoAccentTextColor = fg;
         windowMinButton.Invalidate();
         windowMaxButton.Invalidate();
         windowCloseButton.Invalidate();
@@ -766,11 +768,11 @@ internal sealed partial class ModManagerForm : MaterialForm
     {
         if (!TryValidateDirectoryName(updatedConfiguration.DisabledDirectoryName, out var validationError))
         {
-            MessageBox.Show(
-                validationError,
+            MessageDialog.Warn(
+                this,
+                loc,
                 loc.Get("ui.invalid_directory_name_title"),
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
+                validationError);
             return;
         }
 
@@ -784,11 +786,11 @@ internal sealed partial class ModManagerForm : MaterialForm
             var newDisabledDirectory = Path.Combine(resolvedGameDirectory, updatedConfiguration.DisabledDirectoryName);
             if (string.Equals(newDisabledDirectory, newModsDirectory, StringComparison.OrdinalIgnoreCase))
             {
-                MessageBox.Show(
-                    loc.Get("config.disabled_folder_matches_mods_message"),
+                MessageDialog.Warn(
+                    this,
+                    loc,
                     loc.Get("ui.invalid_directory_title"),
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
+                    loc.Get("config.disabled_folder_matches_mods_message"));
                 return;
             }
 
@@ -825,11 +827,11 @@ internal sealed partial class ModManagerForm : MaterialForm
         }
         catch (Exception exception)
         {
-            MessageBox.Show(
-                exception.Message,
+            MessageDialog.Error(
+                this,
+                loc,
                 loc.Get("update.update_failed_title"),
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
+                exception.Message);
             SetStatus(loc.Get("config.configuration_update_failed_status", exception.Message));
         }
     }
@@ -850,11 +852,11 @@ internal sealed partial class ModManagerForm : MaterialForm
         catch (Exception exception)
         {
             SetStatus(loc.Get("game.game_restart_failed_status", exception.Message));
-            MessageBox.Show(
-                exception.Message,
+            MessageDialog.Error(
+                this,
+                loc,
                 loc.Get("game.game_restart_error_title"),
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
+                exception.Message);
         }
     }
 
@@ -956,11 +958,11 @@ internal sealed partial class ModManagerForm : MaterialForm
             return;
         }
 
-        var shouldMove = MessageBox.Show(
-            loc.Get("mods.move_existing_disabled_mods_prompt", oldMods.Count, Path.GetFileName(oldDirectory), Path.GetFileName(newDirectory)),
+        var shouldMove = MessageDialog.Confirm(
+            this,
+            loc,
             loc.Get("mods.move_existing_disabled_mods_title"),
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Question) == DialogResult.Yes;
+            loc.Get("mods.move_existing_disabled_mods_prompt", oldMods.Count, Path.GetFileName(oldDirectory), Path.GetFileName(newDirectory)));
 
         if (!shouldMove)
         {

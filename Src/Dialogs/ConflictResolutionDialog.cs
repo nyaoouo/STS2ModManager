@@ -77,9 +77,8 @@ internal sealed class ConflictResolutionDialog : DialogShell
         };
         ContentHost.Controls.Add(body);
 
-        var keepIncoming = AddButton(loc.Get("archive.keep_incoming_button"), DialogResult.Yes, MaterialButton.MaterialButtonType.Contained, useAccent: true);
+        AddButton(loc.Get("archive.keep_incoming_button"), DialogResult.Yes, isPrimary: true);
         AddButton(loc.Get("archive.keep_existing_button"), DialogResult.No);
         AddButton(loc.Get("common.cancel_button"), DialogResult.Cancel);
-        AcceptButton = keepIncoming;
     }
 }

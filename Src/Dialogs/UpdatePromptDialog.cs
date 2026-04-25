@@ -32,10 +32,9 @@ internal sealed class UpdatePromptDialog : DialogShell
         };
         ContentHost.Controls.Add(body);
 
-        var update = AddButton(loc.Get("update.update_now_button"), DialogResult.Yes, MaterialButton.MaterialButtonType.Contained, useAccent: true);
+        AddButton(loc.Get("update.update_now_button"), DialogResult.Yes, isPrimary: true);
         AddButton(loc.Get("ui.remind_later_button"), DialogResult.Cancel);
         AddButton(loc.Get("ui.skip_this_version_button"), DialogResult.Ignore);
         AddButton(loc.Get("ui.never_check_button"), DialogResult.No);
-        AcceptButton = update;
     }
 }

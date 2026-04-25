@@ -86,7 +86,12 @@ internal sealed partial class ModManagerForm
             return;
         }
 
-        InstallArchives(droppedPaths, loc.Get("archive.archive_import_title"));
+        // Defer the install work so this OLE drop callback can return immediately.
+        // Otherwise the source Explorer window stays frozen until the entire
+        // unzip + IO + dialog flow completes (Explorer holds a lock on the drop
+        // operation until the target acknowledges it).
+        var dialogTitle = loc.Get("archive.archive_import_title");
+        BeginInvoke(new Action(() => InstallArchives(droppedPaths, dialogTitle)));
     }
 
     private void InstallArchives(IEnumerable<string> archivePaths, string dialogTitle)
@@ -116,11 +121,11 @@ internal sealed partial class ModManagerForm
             SetStatus(summary);
         }
 
-        MessageBox.Show(
-            summary,
+        MessageDialog.Info(
+            this,
+            loc,
             dialogTitle,
-            MessageBoxButtons.OK,
-            MessageBoxIcon.Information);
+            summary);
     }
 
     private OperationResult InstallArchive(string archivePath)
@@ -285,6 +290,17 @@ internal sealed partial class ModManagerForm
             using var stream = entry.Entry.Open();
             using var document = JsonDocument.Parse(stream);
             if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            // A real mod manifest must declare a non-empty string "id". Without
+            // this guard, any random JSON file in the archive (translation
+            // tables, sample data, asset descriptors, etc.) would be picked up
+            // as an install candidate.
+            if (!document.RootElement.TryGetProperty("id", out var idElement)
+                || idElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(idElement.GetString()))
             {
                 return false;
             }

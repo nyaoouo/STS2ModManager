@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Windows.Forms;
 using MaterialSkin.Controls;
+using STS2ModManager.Widgets;
 
 internal static class WidgetFactory
 {
@@ -25,13 +26,13 @@ internal static class WidgetFactory
         return header;
     }
 
-    public static MaterialButton MakeButton(MaterialButton.MaterialButtonType type)
-        => new MaterialButton
+    public static LinkButton MakeButton()
+        => new LinkButton
         {
             AutoSize = true,
-            Type = type,
-            UseAccentColor = false,
-            HighEmphasis = type == MaterialButton.MaterialButtonType.Contained,
+            // Anchor = None centers the button vertically inside a FlowLayoutPanel row,
+            // so it lines up with taller siblings such as MaterialTextBox2.
+            Anchor = AnchorStyles.None,
             Margin = new Padding(0, 0, 6, 0),
         };
 }

@@ -109,11 +109,11 @@ internal sealed partial class ModManagerForm
                 }
                 catch (Exception exception)
                 {
-                    MessageBox.Show(
-                        loc.Get("common.open_release_page_failed_message", exception.Message),
+                    MessageDialog.Error(
+                        this,
+                        loc,
                         loc.Get("update.update_failed_title"),
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Error);
+                        loc.Get("common.open_release_page_failed_message", exception.Message));
                     SetStatus(loc.Get("update.update_open_failed_status", exception.Message));
                 }
                 break;

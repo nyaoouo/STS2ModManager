@@ -8,6 +8,7 @@ using System.Windows.Forms;
 using MaterialSkin;
 using MaterialSkin.Controls;
 using STS2ModManager;
+using STS2ModManager.Dialogs;
 using STS2ModManager.Widgets;
 
 namespace STS2ModManager.Saves;
@@ -146,12 +147,12 @@ internal sealed class SavesPage : UserControl
             return;
         }
 
-        var prompt = MessageBox.Show(
-            loc.Get("saves.save_transfer_prompt", FormatLabel(source), FormatLabel(target)),
+        var prompt = MessageDialog.Confirm(
+            this,
+            loc,
             loc.Get("saves.save_transfer_title"),
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Question);
-        if (prompt != DialogResult.Yes) return;
+            loc.Get("saves.save_transfer_prompt", FormatLabel(source), FormatLabel(target)));
+        if (!prompt) return;
 
         try
         {
@@ -169,7 +170,7 @@ internal sealed class SavesPage : UserControl
         catch (Exception ex)
         {
             reportStatus(loc.Get("saves.save_transfer_failed_status", ex.Message));
-            MessageBox.Show(ex.Message, loc.Get("saves.save_transfer_error_title"), MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageDialog.Error(this, loc, loc.Get("saves.save_transfer_error_title"), ex.Message);
         }
     }
 
@@ -194,7 +195,7 @@ internal sealed class SavesPage : UserControl
         private readonly MaterialComboBox locationCombo;
         private readonly SaveProfileList vanillaList;
         private readonly SaveProfileList moddedList;
-        private readonly MaterialButton copyButton;
+        private readonly LinkButton copyButton;
         private SaveProfileRow? selectedRow;
         private IReadOnlyList<SaveLocation> locations = Array.Empty<SaveLocation>();
         private bool suppressLocationEvent;
@@ -268,14 +269,12 @@ internal sealed class SavesPage : UserControl
             stack.Controls.Add(moddedHeader, 0, 2);
             stack.Controls.Add(moddedList, 0, 3);
 
-            copyButton = new MaterialButton
+            copyButton = new LinkButton
             {
                 AutoSize = true,
-                Type = MaterialButton.MaterialButtonType.Contained,
-                UseAccentColor = true,
-                HighEmphasis = true,
                 Text = isLeft ? loc.Get("saves.save_copy_to_right_button") : loc.Get("saves.save_copy_to_left_button"),
-                Enabled = false,
+                IsHighlight = true,
+                LookDisabled = true,
                 Margin = new System.Windows.Forms.Padding(0, 6, 0, 0),
                 Anchor = isLeft ? AnchorStyles.Right : AnchorStyles.Left,
             };
@@ -335,7 +334,7 @@ internal sealed class SavesPage : UserControl
 
         public SaveProfileInfo? GetSelected() => selectedRow?.Profile;
 
-        public void SetCopyEnabled(bool enabled) => copyButton.Enabled = enabled;
+        public void SetCopyEnabled(bool enabled) => copyButton.LookDisabled = !enabled;
 
         private void ReloadLists()
         {
