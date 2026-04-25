@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.Drawing;
 using System.Globalization;
 using System.Runtime.Versioning;
@@ -23,6 +24,9 @@ internal sealed class SaveProfileRow : Control
     public event Action<SaveProfileRow>? Activated;
 
     public SaveProfileInfo Profile { get; }
+
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool Selected { get; private set; }
 
     private bool hovered;
