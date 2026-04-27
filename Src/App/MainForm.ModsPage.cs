@@ -57,9 +57,30 @@ internal sealed partial class ModManagerForm
 
     private void RefreshCardDisplay()
     {
-        cardPanel.SuspendLayout();
-        cardPanel.Controls.Clear();
+        var savedScroll = cardScrollPanel.AutoScrollPosition;
 
+        using (SuspendDrawing(cardScrollPanel))
+        {
+            cardPanel.SuspendLayout();
+            try
+            {
+                var displayItems = BuildDisplayItems();
+                ReconcileCardEntries(displayItems);
+                ReconcileControlOrder(displayItems);
+                SyncCardWidths();
+            }
+            finally
+            {
+                cardPanel.ResumeLayout(performLayout: true);
+            }
+
+            // Restore scroll (AutoScrollPosition getter returns negative coords; setter expects positive).
+            cardScrollPanel.AutoScrollPosition = new Point(-savedScroll.X, -savedScroll.Y);
+        }
+    }
+
+    private List<DisplayItem> BuildDisplayItems()
+    {
         var search = activeSearchTerm?.Trim() ?? string.Empty;
         bool MatchesSearch(ModInfo mod)
         {
@@ -74,23 +95,25 @@ internal sealed partial class ModManagerForm
         var showEnabled = activeFilter != ModFilter.Disabled;
         var showDisabled = activeFilter != ModFilter.Enabled;
 
+        var items = new List<DisplayItem>();
+
         if (splitModList && activeFilter == ModFilter.All)
         {
             if (showEnabled && enabledFiltered.Count > 0)
             {
-                cardPanel.Controls.Add(WidgetFactory.CreateSectionHeader(loc.Get("mods.enabled_group", enabledFiltered.Count), Font, CardSpacing));
+                items.Add(DisplayItem.Header(loc.Get("mods.enabled_group", enabledFiltered.Count)));
                 foreach (var mod in enabledFiltered)
                 {
-                    cardPanel.Controls.Add(CreateModCard(mod, isEnabled: true));
+                    items.Add(DisplayItem.Card(mod, isEnabled: true));
                 }
             }
 
             if (showDisabled && disabledFiltered.Count > 0)
             {
-                cardPanel.Controls.Add(WidgetFactory.CreateSectionHeader(loc.Get("config.disabled_group", disabledDirectoryName, disabledFiltered.Count), Font, CardSpacing));
+                items.Add(DisplayItem.Header(loc.Get("config.disabled_group", disabledDirectoryName, disabledFiltered.Count)));
                 foreach (var mod in disabledFiltered)
                 {
-                    cardPanel.Controls.Add(CreateModCard(mod, isEnabled: false));
+                    items.Add(DisplayItem.Card(mod, isEnabled: false));
                 }
             }
         }
@@ -103,21 +126,97 @@ internal sealed partial class ModManagerForm
 
             if (allMods.Count > 0)
             {
-                cardPanel.Controls.Add(WidgetFactory.CreateSectionHeader(loc.Get("mods.all_mods_group", allMods.Count), Font, CardSpacing));
+                items.Add(DisplayItem.Header(loc.Get("mods.all_mods_group", allMods.Count)));
                 foreach (var (mod, enabled) in allMods)
                 {
-                    cardPanel.Controls.Add(CreateModCard(mod, isEnabled: enabled));
+                    items.Add(DisplayItem.Card(mod, isEnabled: enabled));
                 }
             }
         }
 
-        if (cardPanel.Controls.Count == 0)
+        if (items.Count == 0)
         {
-            cardPanel.Controls.Add(WidgetFactory.CreateSectionHeader(loc.Get("launch.no_mods_found_label"), Font, CardSpacing));
+            items.Add(DisplayItem.Header(loc.Get("launch.no_mods_found_label")));
         }
 
-        cardPanel.ResumeLayout(performLayout: true);
-        SyncCardWidths();
+        return items;
+    }
+
+    private void ReconcileCardEntries(List<DisplayItem> displayItems)
+    {
+        // Paths that exist anywhere in the cached lists. Anything in cardEntries
+        // not present here is truly gone (uninstalled / external change) and may be disposed.
+        var allCachedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var m in cachedEnabledMods) allCachedPaths.Add(m.FullPath);
+        foreach (var m in cachedDisabledMods) allCachedPaths.Add(m.FullPath);
+
+        var stalePaths = cardEntries.Keys.Where(p => !allCachedPaths.Contains(p)).ToList();
+        foreach (var p in stalePaths)
+        {
+            var entry = cardEntries[p];
+            cardPanel.Controls.Remove(entry.Card);
+            entry.Card.Dispose();
+            cardEntries.Remove(p);
+        }
+
+        // Detach (but don't dispose) any card that the current filter/search excludes.
+        // It stays in cardEntries so reincluding it later is instant.
+        var desiredPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in displayItems)
+        {
+            if (item.Mod is { } mod) desiredPaths.Add(mod.FullPath);
+        }
+        foreach (var (path, entry) in cardEntries)
+        {
+            if (!desiredPaths.Contains(path) && cardPanel.Controls.Contains(entry.Card))
+            {
+                cardPanel.Controls.Remove(entry.Card);
+            }
+        }
+
+        // Headers are stateless and cheap; recreate each time.
+        foreach (var h in headerControls)
+        {
+            cardPanel.Controls.Remove(h);
+            h.Dispose();
+        }
+        headerControls.Clear();
+    }
+
+    private void ReconcileControlOrder(List<DisplayItem> displayItems)
+    {
+        var finalControls = new List<Control>(displayItems.Count);
+        foreach (var item in displayItems)
+        {
+            Control control;
+            if (item.Mod is { } mod)
+            {
+                if (!cardEntries.TryGetValue(mod.FullPath, out var entry))
+                {
+                    entry = CreateModCardEntry(mod);
+                    cardEntries[mod.FullPath] = entry;
+                }
+                UpdateModCardEntry(entry, mod, item.IsEnabled);
+                control = entry.Card;
+            }
+            else
+            {
+                var header = WidgetFactory.CreateSectionHeader(item.HeaderText!, Font, CardSpacing);
+                headerControls.Add(header);
+                control = header;
+            }
+            finalControls.Add(control);
+        }
+
+        for (int i = 0; i < finalControls.Count; i++)
+        {
+            var ctl = finalControls[i];
+            if (!cardPanel.Controls.Contains(ctl))
+            {
+                cardPanel.Controls.Add(ctl);
+            }
+            cardPanel.Controls.SetChildIndex(ctl, i);
+        }
     }
 
     private void SetActiveFilter(ModFilter filter)
@@ -147,11 +246,61 @@ internal sealed partial class ModManagerForm
 
         if (result.Outcome == ModMoveOutcome.Changed)
         {
+            // Local update path: when MoveMod yielded a known new directory, mutate cached state
+            // and re-render in place instead of rereading both folders from disk.
+            if (result.NewFullPath is { } newPath && Directory.Exists(newPath))
+            {
+                ApplyLocalToggle(mod, enable, newPath);
+                SetStatus(result.Message);
+                return;
+            }
+
             ReloadLists(result.Message);
             return;
         }
 
         SetStatus(result.Message);
+    }
+
+    private void ApplyLocalToggle(ModInfo originalMod, bool nowEnabled, string newFullPath)
+    {
+        try
+        {
+            UpdateDirectoryLabels();
+
+            cachedEnabledMods.RemoveAll(m =>
+                string.Equals(m.FullPath, originalMod.FullPath, StringComparison.OrdinalIgnoreCase));
+            cachedDisabledMods.RemoveAll(m =>
+                string.Equals(m.FullPath, originalMod.FullPath, StringComparison.OrdinalIgnoreCase));
+
+            var newInfo = ModLoader.ReadModInfo(new DirectoryInfo(newFullPath));
+            var targetList = nowEnabled ? cachedEnabledMods : cachedDisabledMods;
+            targetList.Add(newInfo);
+            targetList.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.FolderName, b.FolderName));
+
+            enabledModCount = cachedEnabledMods.Count;
+            disabledModCount = cachedDisabledMods.Count;
+
+            // Re-key the existing card entry to the new path so RefreshCardDisplay reuses it
+            // (preserving control identity, switch animation continuity, and selection).
+            if (cardEntries.TryGetValue(originalMod.FullPath, out var entry))
+            {
+                cardEntries.Remove(originalMod.FullPath);
+                cardEntries[newInfo.FullPath] = entry;
+            }
+            if (selectedModPaths.Remove(originalMod.FullPath))
+            {
+                selectedModPaths.Add(newInfo.FullPath);
+            }
+
+            RefreshCardDisplay();
+            UpdateButtons();
+        }
+        catch
+        {
+            // Anything unexpected -> fall back to the canonical full reload.
+            ReloadLists(string.Empty);
+        }
     }
 
     private void ToggleAllMods(bool enable)
@@ -237,6 +386,7 @@ internal sealed partial class ModManagerForm
             if (choice == ConflictChoice.KeepExisting)
             {
                 DeleteModDirectories(new[] { selectedMod });
+                // Selected mod was deleted, no NewFullPath; ToggleMod falls back to ReloadLists.
                 return new ModMoveResult(ModMoveOutcome.Changed, loc.Get("archive.kept_existing_status", selectedMod.Id));
             }
 
@@ -261,7 +411,10 @@ internal sealed partial class ModManagerForm
         try
         {
             MoveDirectory(selectedMod.FullPath, targetPath);
-            return new ModMoveResult(ModMoveOutcome.Changed, LocalizedFormats.MoveCompletedStatus(loc, operationVerb, selectedMod.Id, selectedMod.Name));
+            return new ModMoveResult(
+                ModMoveOutcome.Changed,
+                LocalizedFormats.MoveCompletedStatus(loc, operationVerb, selectedMod.Id, selectedMod.Name),
+                NewFullPath: targetPath);
         }
         catch (Exception exception)
         {
@@ -480,26 +633,25 @@ internal sealed partial class ModManagerForm
 
     private Panel CreateModCard(ModInfo mod, bool isEnabled)
     {
-        var skin = MaterialSkinManager.Instance;
-        var dark = skin.Theme == MaterialSkinManager.Themes.DARK;
-        var enabledColor = Color.FromArgb(dark ? 129 : 76, dark ? 199 : 175, dark ? 132 : 80);
-        var disabledColor = dark ? Color.FromArgb(120, 120, 120) : Color.FromArgb(180, 180, 180);
-        var statusColor = isEnabled ? enabledColor : disabledColor;
-        var unselectedBack = dark ? Color.FromArgb(48, 48, 48) : Color.White;
-        var selectedBack = dark ? Color.FromArgb(33, 56, 86) : Color.FromArgb(219, 234, 249);
-        var isSelected = selectedModPaths.Contains(mod.FullPath);
-        var cardBack = isSelected ? selectedBack : unselectedBack;
+        var entry = CreateModCardEntry(mod);
+        UpdateModCardEntry(entry, mod, isEnabled);
+        return entry.Card;
+    }
 
+    private ModCardEntry CreateModCardEntry(ModInfo mod)
+    {
         var card = new Panel
         {
             Height = CardHeight,
             Margin = new Padding(CardSpacing),
             BorderStyle = BorderStyle.None,
-            BackColor = cardBack,
             Cursor = Cursors.Hand,
             Tag = mod
         };
+        EnableDoubleBuffered(card);
+
         // Custom border: 2px accent when selected, 1px theme divider otherwise.
+        // Reads card.Tag at paint time so it always sees the current ModInfo.
         card.Paint += (s, e) =>
         {
             var selected = card.Tag is ModInfo m && selectedModPaths.Contains(m.FullPath);
@@ -518,8 +670,7 @@ internal sealed partial class ModManagerForm
         var indicator = new Panel
         {
             Dock = DockStyle.Left,
-            Width = 5,
-            BackColor = statusColor
+            Width = 5
         };
 
         var contentLayout = new TableLayoutPanel
@@ -527,7 +678,6 @@ internal sealed partial class ModManagerForm
             Dock = DockStyle.Fill,
             ColumnCount = 2,
             RowCount = 2,
-            BackColor = cardBack,
             Padding = new Padding(8, 6, 8, 6)
         };
         contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
@@ -535,19 +685,12 @@ internal sealed partial class ModManagerForm
         contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34f));
         contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
-        var nameForeground = dark
-            ? (isEnabled ? Color.White : Color.FromArgb(170, 170, 170))
-            : (isEnabled ? SystemColors.ControlText : SystemColors.GrayText);
-        var detailForeground = dark ? Color.FromArgb(170, 170, 170) : SystemColors.GrayText;
-
         var nameLabel = new Label
         {
             AutoSize = false,
             Dock = DockStyle.Fill,
             Font = new Font(Font, FontStyle.Bold),
-            ForeColor = nameForeground,
             BackColor = Color.Transparent,
-            Text = mod.Name,
             TextAlign = ContentAlignment.TopLeft
         };
 
@@ -556,9 +699,7 @@ internal sealed partial class ModManagerForm
             AutoSize = false,
             AutoEllipsis = true,
             Dock = DockStyle.Fill,
-            ForeColor = detailForeground,
             BackColor = Color.Transparent,
-            Text = $"ID: {mod.Id}  \u2022  {FormatVersionText(mod.Version)}  \u2022  {mod.FolderName}",
             TextAlign = ContentAlignment.TopLeft
         };
 
@@ -566,21 +707,7 @@ internal sealed partial class ModManagerForm
         {
             AutoSize = true,
             Anchor = AnchorStyles.None,
-            Checked = isEnabled,
             Margin = new Padding(8, 0, 0, 0),
-            BackColor = cardBack,
-            Tag = mod,
-        };
-        // Avoid recursive ToggleMod when we set Checked programmatically during reload.
-        var lastChecked = isEnabled;
-        enableSwitch.CheckedChanged += (_, _) =>
-        {
-            if (enableSwitch.Checked == lastChecked)
-            {
-                return;
-            }
-            lastChecked = enableSwitch.Checked;
-            ToggleMod(mod, enable: enableSwitch.Checked);
         };
 
         contentLayout.Controls.Add(nameLabel, 0, 0);
@@ -591,14 +718,79 @@ internal sealed partial class ModManagerForm
         card.Controls.Add(contentLayout);
         card.Controls.Add(indicator);
 
-        void SelectThis(object? s, EventArgs e) => SelectCard(card, mod);
+        var entry = new ModCardEntry(card, indicator, contentLayout, nameLabel, detailLabel, enableSwitch);
+        entry.Mod = mod;
+
+        enableSwitch.CheckedChanged += (_, _) =>
+        {
+            if (entry.SuppressSwitchHandler) return;
+            var modNow = entry.Card.Tag as ModInfo ?? entry.Mod;
+            ToggleMod(modNow, enable: enableSwitch.Checked);
+        };
+
+        void SelectThis(object? s, EventArgs e)
+        {
+            var modNow = entry.Card.Tag as ModInfo ?? entry.Mod;
+            SelectCard(card, modNow);
+        }
         card.Click += SelectThis;
         contentLayout.Click += SelectThis;
         nameLabel.Click += SelectThis;
         detailLabel.Click += SelectThis;
         indicator.Click += SelectThis;
 
-        return card;
+        return entry;
+    }
+
+    private void UpdateModCardEntry(ModCardEntry entry, ModInfo mod, bool isEnabled)
+    {
+        var skin = MaterialSkinManager.Instance;
+        var dark = skin.Theme == MaterialSkinManager.Themes.DARK;
+        var enabledColor = Color.FromArgb(dark ? 129 : 76, dark ? 199 : 175, dark ? 132 : 80);
+        var disabledColor = dark ? Color.FromArgb(120, 120, 120) : Color.FromArgb(180, 180, 180);
+        var statusColor = isEnabled ? enabledColor : disabledColor;
+        var unselectedBack = dark ? Color.FromArgb(48, 48, 48) : Color.White;
+        var selectedBack = dark ? Color.FromArgb(33, 56, 86) : Color.FromArgb(219, 234, 249);
+        var isSelected = selectedModPaths.Contains(mod.FullPath);
+        var cardBack = isSelected ? selectedBack : unselectedBack;
+
+        var nameForeground = dark
+            ? (isEnabled ? Color.White : Color.FromArgb(170, 170, 170))
+            : (isEnabled ? SystemColors.ControlText : SystemColors.GrayText);
+        var detailForeground = dark ? Color.FromArgb(170, 170, 170) : SystemColors.GrayText;
+
+        entry.Mod = mod;
+        entry.IsEnabled = isEnabled;
+        entry.Card.Tag = mod;
+
+        // Always re-apply colors so theme switches and selection toggles reach existing cards.
+        entry.Card.BackColor = cardBack;
+        entry.Content.BackColor = cardBack;
+        entry.EnableSwitch.BackColor = cardBack;
+        entry.Indicator.BackColor = statusColor;
+        entry.NameLabel.ForeColor = nameForeground;
+        entry.DetailLabel.ForeColor = detailForeground;
+
+        var newName = mod.Name ?? string.Empty;
+        if (!string.Equals(entry.NameLabel.Text, newName, StringComparison.Ordinal))
+        {
+            entry.NameLabel.Text = newName;
+        }
+
+        var newDetail = $"ID: {mod.Id}  \u2022  {FormatVersionText(mod.Version)}  \u2022  {mod.FolderName}";
+        if (!string.Equals(entry.DetailLabel.Text, newDetail, StringComparison.Ordinal))
+        {
+            entry.DetailLabel.Text = newDetail;
+        }
+
+        if (entry.EnableSwitch.Checked != isEnabled)
+        {
+            entry.SuppressSwitchHandler = true;
+            try { entry.EnableSwitch.Checked = isEnabled; }
+            finally { entry.SuppressSwitchHandler = false; }
+        }
+
+        entry.Card.Invalidate();
     }
 
     private void SelectCard(Panel card, ModInfo mod)
@@ -829,5 +1021,76 @@ internal sealed partial class ModManagerForm
         }
 
         return string.Join(Environment.NewLine, comparisonLines.Distinct(StringComparer.OrdinalIgnoreCase));
+    }
+
+    // ---- Diff-refresh support: per-card state + helpers ----
+
+    private sealed class ModCardEntry
+    {
+        public Panel Card { get; }
+        public Panel Indicator { get; }
+        public TableLayoutPanel Content { get; }
+        public Label NameLabel { get; }
+        public Label DetailLabel { get; }
+        public MaterialSwitch EnableSwitch { get; }
+        public ModInfo Mod { get; set; } = null!;
+        public bool IsEnabled { get; set; }
+        public bool SuppressSwitchHandler { get; set; }
+
+        public ModCardEntry(Panel card, Panel indicator, TableLayoutPanel content, Label name, Label detail, MaterialSwitch sw)
+        {
+            Card = card;
+            Indicator = indicator;
+            Content = content;
+            NameLabel = name;
+            DetailLabel = detail;
+            EnableSwitch = sw;
+        }
+    }
+
+    private readonly record struct DisplayItem(ModInfo? Mod, bool IsEnabled, string? HeaderText)
+    {
+        public static DisplayItem Card(ModInfo mod, bool isEnabled) => new(mod, isEnabled, null);
+        public static DisplayItem Header(string text) => new(null, false, text);
+    }
+
+    private readonly Dictionary<string, ModCardEntry> cardEntries =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<Control> headerControls = new();
+
+    private const int WM_SETREDRAW = 0x000B;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern int SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    private static IDisposable SuspendDrawing(Control control) => new DrawingSuspension(control);
+
+    private sealed class DrawingSuspension : IDisposable
+    {
+        private readonly Control _control;
+        public DrawingSuspension(Control control)
+        {
+            _control = control;
+            if (_control.IsHandleCreated)
+            {
+                SendMessage(_control.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+            }
+        }
+        public void Dispose()
+        {
+            if (_control.IsHandleCreated)
+            {
+                SendMessage(_control.Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
+                _control.Invalidate(invalidateChildren: true);
+            }
+        }
+    }
+
+    private static void EnableDoubleBuffered(Control control)
+    {
+        var prop = typeof(Control).GetProperty(
+            "DoubleBuffered",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        prop?.SetValue(control, true);
     }
 }

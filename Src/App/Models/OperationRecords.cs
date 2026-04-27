@@ -19,6 +19,6 @@ internal sealed record ArchiveEntryInfo(ZipArchiveEntry Entry, string Normalized
 
 internal sealed record OperationResult(bool RefreshRequired, string Message);
 
-internal sealed record ModMoveResult(ModMoveOutcome Outcome, string Message);
+internal sealed record ModMoveResult(ModMoveOutcome Outcome, string Message, string? NewFullPath = null);
 
 internal sealed record LatestReleaseInfo(string Version, string ReleasePageUrl);

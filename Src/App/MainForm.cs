@@ -195,6 +195,10 @@ internal sealed partial class ModManagerForm : MaterialForm
             Padding = new Padding(4)
         };
         cardScrollPanel.Controls.Add(cardPanel);
+        // Double-buffer both scroll host and inner flow panel so diff-based refreshes
+        // never paint an intermediate "blank" frame while controls are being reordered.
+        EnableDoubleBuffered(cardScrollPanel);
+        EnableDoubleBuffered(cardPanel);
         cardScrollBar = ThinScrollBarHost.Attach(cardScrollPanel, cardPanel, manageContentWidth: false);
         themeController.EffectiveThemeChanged += () => cardScrollBar.Invalidate();
         cardScrollPanel.Resize += (_, _) => SyncCardWidths();
