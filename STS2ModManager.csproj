@@ -31,7 +31,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Using Include="STS2ModManager.App.Localization" />
+    <Using Include="STS2ModManager.Services" />
+    <Using Include="STS2ModManager.Services.UI" />
+    <Using Include="STS2ModManager.Models" />
   </ItemGroup>
 
   <!-- Keep MaterialSkin fully in the trimmed output (NuGet package id is MaterialSkin.2 but
