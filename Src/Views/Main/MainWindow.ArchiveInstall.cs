@@ -189,14 +189,23 @@ internal sealed partial class MainWindow
                 sourceFolder,
                 overwriteExisting: overwrite);
 
-            // Auto-apply the freshly installed version: previously-active install
-            // (if any) is mirrored into the archive by ActivateVersion before
-            // being replaced, so nothing is lost.
+            // Auto-apply the freshly installed version. Normally the previously-
+            // active install is mirrored into the archive by ActivateVersion
+            // before being replaced. When the user explicitly chose "keep
+            // incoming" on a duplicate-version conflict, however, they want a
+            // straight replace -- mirroring would create a sibling
+            // "<version>-1.zip" because the preferred name was just overwritten
+            // with new content. Pass currentActive=null in that case to skip
+            // the mirror step.
             string? activationError = null;
             try
             {
-                var currentActive = ModLoader.LoadMods(modsDirectory)
-                    .FirstOrDefault(mod => string.Equals(mod.Id, incomingMod.Id, StringComparison.OrdinalIgnoreCase));
+                ModInfo? currentActive = null;
+                if (!overwrite)
+                {
+                    currentActive = ModLoader.LoadMods(modsDirectory)
+                        .FirstOrDefault(mod => string.Equals(mod.Id, incomingMod.Id, StringComparison.OrdinalIgnoreCase));
+                }
                 ModArchiveService.ActivateVersion(
                     modsDirectory,
                     disabledDirectory,
