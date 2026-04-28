@@ -191,6 +191,9 @@ internal sealed partial class MainWindow : MaterialForm, STS2ModManager.Views.Ma
         modView.SplitModList = splitModList;
         modView.RestartGameRequested += () => RestartGame();
         modView.RefreshRequested += () => RefreshAllRequested?.Invoke();
+        modView.ActivateVersionRequested += HandleActivateVersionRequested;
+        modView.DeleteVersionRequested += HandleDeleteVersionRequested;
+        modView.DeleteAllVersionsRequested += HandleDeleteAllVersionsRequested;
 
         infoButton = new LinkButton
         {

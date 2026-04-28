@@ -16,7 +16,7 @@ internal sealed record AppSettings(
     ThemeMode ThemeMode = ThemeMode.System,
     int BackupRetentionCount = 5)
 {
-    public static AppSettings Default { get; } = new(".mods", null, null, LaunchMode.Steam, null);
+    public static AppSettings Default { get; } = new(".archive-mods", null, null, LaunchMode.Steam, null);
 }
 
 [JsonSourceGenerationOptions(WriteIndented = true)]

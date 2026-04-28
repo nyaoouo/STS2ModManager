@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.Versioning;
+using STS2ModManager.Models;
 using STS2ModManager.Services.UI;
 
 namespace STS2ModManager.Views.Main;
@@ -50,8 +51,20 @@ internal interface IModView
     /// <summary>Fired when the user clicks the Restart Game button on the mods toolbar.</summary>
     event Action? RestartGameRequested;
 
+    /// <summary>Fired when the user picks a different archived version for a mod.</summary>
+    event Action<ModInfo, ModVersionEntry>? ActivateVersionRequested;
+
+    /// <summary>Fired when the user requests deletion of an archived version.</summary>
+    event Action<ModInfo, ModVersionEntry>? DeleteVersionRequested;
+
+    /// <summary>Fired when the user requests deletion of every archived version of a mod.</summary>
+    event Action<ModInfo>? DeleteAllVersionsRequested;
+
     /// <summary>Push the current enabled/disabled mod lists into the view.</summary>
     void SetMods(IReadOnlyList<ModInfo> enabled, IReadOnlyList<ModInfo> disabled);
+
+    /// <summary>Push the per-mod archived-version lists used by the version chooser.</summary>
+    void SetArchiveData(IReadOnlyDictionary<string, IReadOnlyList<ModVersionEntry>> versionsByModId);
 
     /// <summary>Update the count badges next to each filter chip.</summary>
     void SetFilterCounts(int enabledCount, int disabledCount);

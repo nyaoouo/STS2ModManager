@@ -32,7 +32,7 @@ internal sealed partial class ModView
 {
     private const int CardMinWidth = 250;
     private const int CardSpacing = 6;
-    private const int CardHeight = 90;
+    private const int CardHeight = 96;
     private const int WM_SETREDRAW = 0x000B;
 
     private readonly Dictionary<string, ModCardEntry> cardEntries =
@@ -265,21 +265,36 @@ internal sealed partial class ModView
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 2,
+            RowCount = 3,
             Padding = new Padding(8, 6, 8, 6)
         };
         contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34f));
-        contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 40f));
+        contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 30f));
+        contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 30f));
 
+        // NOTE: don't set Font explicitly here. When a card is recreated after
+        // a toggle, the user control's inherited Font may have shifted (e.g.
+        // MaterialSkin's Roboto finishing registration), and a captured Font
+        // instance from earlier cards no longer matches. Letting the Label
+        // inherit from its parent guarantees every card renders identically.
         var nameLabel = new Label
         {
             AutoSize = false,
+            AutoEllipsis = true,
             Dock = DockStyle.Fill,
-            Font = new Font(Font, FontStyle.Bold),
             BackColor = Color.Transparent,
-            TextAlign = ContentAlignment.TopLeft
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+
+        var versionLabel = new Label
+        {
+            AutoSize = false,
+            AutoEllipsis = true,
+            Dock = DockStyle.Fill,
+            BackColor = Color.Transparent,
+            TextAlign = ContentAlignment.MiddleLeft
         };
 
         var detailLabel = new Label
@@ -288,7 +303,7 @@ internal sealed partial class ModView
             AutoEllipsis = true,
             Dock = DockStyle.Fill,
             BackColor = Color.Transparent,
-            TextAlign = ContentAlignment.TopLeft
+            TextAlign = ContentAlignment.MiddleLeft
         };
 
         var enableSwitch = new MaterialSwitch
@@ -300,14 +315,39 @@ internal sealed partial class ModView
 
         contentLayout.Controls.Add(nameLabel, 0, 0);
         contentLayout.Controls.Add(enableSwitch, 1, 0);
-        contentLayout.SetRowSpan(enableSwitch, 2);
-        contentLayout.Controls.Add(detailLabel, 0, 1);
+        contentLayout.SetRowSpan(enableSwitch, 3);
+        contentLayout.Controls.Add(versionLabel, 0, 1);
+        contentLayout.Controls.Add(detailLabel, 0, 2);
 
         card.Controls.Add(contentLayout);
         card.Controls.Add(indicator);
 
-        var entry = new ModCardEntry(card, indicator, contentLayout, nameLabel, detailLabel, enableSwitch);
+        var entry = new ModCardEntry(card, indicator, contentLayout, nameLabel, versionLabel, detailLabel, enableSwitch);
         entry.Mod = mod;
+
+        // Right-click anywhere on the card opens the version-chooser menu
+        // (only populated when the mod has any archived versions).
+        var contextMenu = new ContextMenuStrip
+        {
+            Renderer = new ThemedContextMenuRenderer(),
+            ShowImageMargin = false,
+        };
+        contextMenu.Opening += (s, e) =>
+        {
+            var modNow = entry.Card.Tag as ModInfo ?? entry.Mod;
+            PopulateVersionMenu(contextMenu, modNow, entry.IsEnabled);
+            if (contextMenu.Items.Count == 0)
+            {
+                e.Cancel = true;
+            }
+        };
+        card.ContextMenuStrip = contextMenu;
+        contentLayout.ContextMenuStrip = contextMenu;
+        nameLabel.ContextMenuStrip = contextMenu;
+        versionLabel.ContextMenuStrip = contextMenu;
+        detailLabel.ContextMenuStrip = contextMenu;
+        indicator.ContextMenuStrip = contextMenu;
+        enableSwitch.ContextMenuStrip = contextMenu;
 
         enableSwitch.CheckedChanged += (_, _) =>
         {
@@ -325,6 +365,7 @@ internal sealed partial class ModView
         card.Click += SelectThis;
         contentLayout.Click += SelectThis;
         nameLabel.Click += SelectThis;
+        versionLabel.Click += SelectThis;
         detailLabel.Click += SelectThis;
         indicator.Click += SelectThis;
 
@@ -343,10 +384,13 @@ internal sealed partial class ModView
         var isSelected = selectedModPaths.Contains(mod.FullPath);
         var cardBack = isSelected ? selectedBack : unselectedBack;
 
-        var nameForeground = dark
-            ? (isEnabled ? Color.White : Color.FromArgb(170, 170, 170))
-            : (isEnabled ? SystemColors.ControlText : SystemColors.GrayText);
-        var detailForeground = dark ? Color.FromArgb(170, 170, 170) : SystemColors.GrayText;
+        // Text colours are intentionally state-independent: only the left
+        // indicator strip and the toggle switch reflect enabled / disabled.
+        // Otherwise toggling a mod made the name and id "pop" or "fade"
+        // which read as a font-weight change.
+        var nameForeground = dark ? Color.White : SystemColors.ControlText;
+        var versionForeground = dark ? Color.FromArgb(210, 210, 210) : Color.FromArgb(60, 60, 60);
+        var detailForeground = dark ? Color.FromArgb(140, 140, 140) : Color.FromArgb(140, 140, 140);
 
         entry.Mod = mod;
         entry.IsEnabled = isEnabled;
@@ -357,8 +401,10 @@ internal sealed partial class ModView
         entry.EnableSwitch.BackColor = cardBack;
         entry.Indicator.BackColor = statusColor;
         entry.NameLabel.BackColor = cardBack;
+        entry.VersionLabel.BackColor = cardBack;
         entry.DetailLabel.BackColor = cardBack;
         entry.NameLabel.ForeColor = nameForeground;
+        entry.VersionLabel.ForeColor = versionForeground;
         entry.DetailLabel.ForeColor = detailForeground;
 
         var newName = mod.Name ?? string.Empty;
@@ -367,7 +413,17 @@ internal sealed partial class ModView
             entry.NameLabel.Text = newName;
         }
 
-        var newDetail = $"ID: {mod.Id}  \u2022  {FormatVersionText(mod.Version)}  \u2022  {mod.FolderName}";
+        var versionCount = archiveVersionsByModId.TryGetValue(mod.Id, out var versions) ? versions.Count : 0;
+        var versionsHint = versionCount > 1
+            ? $"  \u2022  {loc.Get("archive.version_count_hint", versionCount)}"
+            : string.Empty;
+        var newVersion = $"{FormatVersionText(mod.Version)}{versionsHint}";
+        if (!string.Equals(entry.VersionLabel.Text, newVersion, StringComparison.Ordinal))
+        {
+            entry.VersionLabel.Text = newVersion;
+        }
+
+        var newDetail = mod.Id;
         if (!string.Equals(entry.DetailLabel.Text, newDetail, StringComparison.Ordinal))
         {
             entry.DetailLabel.Text = newDetail;
@@ -458,18 +514,20 @@ internal sealed partial class ModView
         public Panel Indicator { get; }
         public TableLayoutPanel Content { get; }
         public Label NameLabel { get; }
+        public Label VersionLabel { get; }
         public Label DetailLabel { get; }
         public MaterialSwitch EnableSwitch { get; }
         public ModInfo Mod { get; set; } = null!;
         public bool IsEnabled { get; set; }
         public bool SuppressSwitchHandler { get; set; }
 
-        public ModCardEntry(Panel card, Panel indicator, TableLayoutPanel content, Label name, Label detail, MaterialSwitch sw)
+        public ModCardEntry(Panel card, Panel indicator, TableLayoutPanel content, Label name, Label version, Label detail, MaterialSwitch sw)
         {
             Card = card;
             Indicator = indicator;
             Content = content;
             NameLabel = name;
+            VersionLabel = version;
             DetailLabel = detail;
             EnableSwitch = sw;
         }

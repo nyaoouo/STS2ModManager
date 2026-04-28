@@ -141,54 +141,90 @@ internal sealed partial class MainWindow
             installPlan.Name,
             installPlan.Version,
             installPlan.InstallFolderName,
-            Path.Combine(disabledDirectory, installPlan.InstallFolderName));
+            string.Empty);
 
-        var conflicts = FindModsById(incomingMod.Id);
-        if (conflicts.Count > 0)
+        // The new install model: every incoming archive becomes one entry in
+        // <archiveDir>/<Id>/<version>.zip. The active install at mods/<Id>/
+        // is NEVER touched here -- the user activates a version explicitly via
+        // the version chooser. The only conflict prompt fires when the same
+        // (id, version) zip already exists in the archive.
+        var versionAlreadyArchived = ModArchiveService.HasArchivedVersion(
+            disabledDirectory, incomingMod.Id, incomingMod.Version);
+
+        var overwrite = false;
+        if (versionAlreadyArchived)
         {
+            var existing = FindModsById(incomingMod.Id);
             var choice = PromptConflictResolution(
                 incomingMod,
-                conflicts,
+                existing,
                 $"archive {archiveFileName}");
 
-            if (choice == ConflictChoice.Cancel)
+            switch (choice)
             {
-                return new ArchiveInstallStepResult(
-                    new OperationResult(false, loc.Get("archive.archive_install_canceled", archiveFileName)),
-                    StopProcessingArchive: true);
+                case ConflictChoice.Cancel:
+                    return new ArchiveInstallStepResult(
+                        new OperationResult(false, loc.Get("archive.archive_install_canceled", archiveFileName)),
+                        StopProcessingArchive: true);
+                case ConflictChoice.KeepExisting:
+                    return new ArchiveInstallStepResult(
+                        new OperationResult(false, loc.Get("archive.archive_kept_existing", archiveFileName, incomingMod.Id)),
+                        StopProcessingArchive: false);
+                case ConflictChoice.KeepIncoming:
+                    overwrite = true;
+                    break;
             }
-
-            if (choice == ConflictChoice.KeepExisting)
-            {
-                return new ArchiveInstallStepResult(
-                    new OperationResult(false, loc.Get("archive.archive_kept_existing", archiveFileName, incomingMod.Id)),
-                    StopProcessingArchive: false);
-            }
-
-            DeleteModDirectories(conflicts);
-        }
-
-        var targetPath = Path.Combine(disabledDirectory, installPlan.InstallFolderName);
-        if (Directory.Exists(targetPath))
-        {
-            return new ArchiveInstallStepResult(
-                new OperationResult(false, loc.Get("archive.archive_target_folder_exists", archiveFileName, installPlan.InstallFolderName)),
-                StopProcessingArchive: false);
         }
 
         string? extractionRoot = null;
         try
         {
             extractionRoot = ArchiveInstallService.ExtractArchiveToTemporaryFolder(archivePath, installPlan);
-            MoveDirectory(Path.Combine(extractionRoot, installPlan.InstallFolderName), targetPath);
+            var sourceFolder = Path.Combine(extractionRoot, installPlan.InstallFolderName);
+
+            var (zipPath, outcome) = ModArchiveService.InstallVersionFromFolder(
+                disabledDirectory,
+                incomingMod.Id,
+                incomingMod.Version,
+                sourceFolder,
+                overwriteExisting: overwrite);
+
+            // Auto-apply the freshly installed version: previously-active install
+            // (if any) is mirrored into the archive by ActivateVersion before
+            // being replaced, so nothing is lost.
+            string? activationError = null;
+            try
+            {
+                var currentActive = ModLoader.LoadMods(modsDirectory)
+                    .FirstOrDefault(mod => string.Equals(mod.Id, incomingMod.Id, StringComparison.OrdinalIgnoreCase));
+                ModArchiveService.ActivateVersion(
+                    modsDirectory,
+                    disabledDirectory,
+                    currentActive,
+                    incomingMod.Id,
+                    Path.GetFileName(zipPath));
+            }
+            catch (Exception activationException)
+            {
+                activationError = activationException.Message;
+            }
+
+            var messageKey = outcome switch
+            {
+                ModArchiveService.InstallOutcome.Replaced => "archive.archive_version_replaced",
+                _ => "archive.archive_version_added",
+            };
+            var baseMessage = loc.Get(
+                messageKey,
+                archiveFileName,
+                incomingMod.Id,
+                FormatVersionText(incomingMod.Version),
+                Path.GetFileName(zipPath));
+            var fullMessage = activationError == null
+                ? baseMessage
+                : baseMessage + " " + loc.Get("archive.archive_auto_activate_failed", activationError);
             return new ArchiveInstallStepResult(
-                new OperationResult(true, LocalizedFormats.ArchiveInstalled(
-                    loc,
-                    archiveFileName,
-                    installPlan.Id,
-                    disabledDirectoryName,
-                    installPlan.ArchiveFolderName,
-                    installPlan.InstallFolderName)),
+                new OperationResult(true, fullMessage),
                 StopProcessingArchive: false);
         }
         catch (Exception exception)
@@ -270,4 +306,80 @@ internal sealed partial class MainWindow
             DescribeVersionComparison(incomingMod, existingMods),
             mod => FormatPathForDisplay(mod.FullPath),
             FormatVersionText);
+
+    private void HandleActivateVersionRequested(ModInfo mod, ModVersionEntry version)
+    {
+        try
+        {
+            // Use the real on-disk active mod (if any) so EnsureActiveMirrored
+            // never tries to zip a synthesized placeholder path.
+            var live = ResolveActiveModOrNull(mod.Id);
+            ModArchiveService.ActivateVersion(modsDirectory, disabledDirectory, currentActive: live, mod.Id, version.ZipFileName);
+            modPresenter?.Reload(loc.Get("archive.version_activated_status", mod.Id, version.Version));
+        }
+        catch (Exception ex)
+        {
+            MessageDialog.Error(this, loc, loc.Get("mods.move_error_title"), ex.Message);
+            SetStatus(loc.Get("mods.move_failed_status", mod.Id, ex.Message));
+        }
+    }
+
+    private void HandleDeleteVersionRequested(ModInfo mod, ModVersionEntry version)
+    {
+        if (!MessageDialog.Confirm(
+                this,
+                loc,
+                loc.Get("archive.delete_version_title"),
+                loc.Get("archive.delete_version_prompt", FormatVersionText(version.Version), mod.Id)))
+        {
+            return;
+        }
+
+        try
+        {
+            // Only treat the mod as currently active if there really is a live
+            // install at mods/<Id>/. Otherwise (mod is disabled) any archived
+            // version is fair game to delete.
+            var live = ResolveActiveModOrNull(mod.Id);
+            ModArchiveService.DeleteVersion(disabledDirectory, currentActive: live, mod.Id, version.ZipFileName, force: false);
+            modPresenter?.Reload(loc.Get("archive.version_deleted_status", FormatVersionText(version.Version), mod.Id));
+        }
+        catch (Exception ex)
+        {
+            MessageDialog.Error(this, loc, loc.Get("mods.move_error_title"), ex.Message);
+            SetStatus(loc.Get("mods.move_failed_status", mod.Id, ex.Message));
+        }
+    }
+
+    private void HandleDeleteAllVersionsRequested(ModInfo mod)
+    {
+        if (!MessageDialog.Confirm(
+                this,
+                loc,
+                loc.Get("archive.delete_all_versions_title"),
+                loc.Get("archive.delete_all_versions_prompt", mod.Id)))
+        {
+            return;
+        }
+
+        try
+        {
+            var live = ResolveActiveModOrNull(mod.Id);
+            var deleted = ModArchiveService.DeleteAllVersions(disabledDirectory, currentActive: live, mod.Id);
+            modPresenter?.Reload(loc.Get("archive.all_versions_deleted_status", deleted, mod.Id));
+        }
+        catch (Exception ex)
+        {
+            MessageDialog.Error(this, loc, loc.Get("mods.move_error_title"), ex.Message);
+            SetStatus(loc.Get("mods.move_failed_status", mod.Id, ex.Message));
+        }
+    }
+
+    private ModInfo? ResolveActiveModOrNull(string modId)
+    {
+        var activePath = Path.Combine(modsDirectory, modId);
+        if (!Directory.Exists(activePath)) return null;
+        return ModLoader.LoadMods(modsDirectory)
+            .FirstOrDefault(mod => string.Equals(mod.Id, modId, StringComparison.OrdinalIgnoreCase));
+    }
 }

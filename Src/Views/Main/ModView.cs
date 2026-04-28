@@ -74,6 +74,9 @@ internal sealed partial class ModView : UserControl, IModView
     public event Action<ModFilter>? FilterChanged;
     public event Action<IReadOnlyList<string>>? ArchivesDropped;
     public event Action? RestartGameRequested;
+    public event Action<ModInfo, ModVersionEntry>? ActivateVersionRequested;
+    public event Action<ModInfo, ModVersionEntry>? DeleteVersionRequested;
+    public event Action<ModInfo>? DeleteAllVersionsRequested;
 #pragma warning restore CS0067
 
     // --- toolbar controls ---
@@ -96,6 +99,8 @@ internal sealed partial class ModView : UserControl, IModView
     // --- mods state ---
     private List<ModInfo> cachedEnabledMods = new();
     private List<ModInfo> cachedDisabledMods = new();
+    private readonly Dictionary<string, IReadOnlyList<ModVersionEntry>> archiveVersionsByModId
+        = new(StringComparer.OrdinalIgnoreCase);
     private string activeSearchTerm = string.Empty;
     private ModFilter activeFilter = ModFilter.All;
     private readonly HashSet<string> selectedModPaths = new(StringComparer.OrdinalIgnoreCase);
@@ -288,6 +293,16 @@ internal sealed partial class ModView : UserControl, IModView
         disabledModCount = cachedDisabledMods.Count;
         RefreshCardDisplay();
         UpdateButtons();
+    }
+
+    public void SetArchiveData(IReadOnlyDictionary<string, IReadOnlyList<ModVersionEntry>> versionsByModId)
+    {
+        archiveVersionsByModId.Clear();
+        foreach (var kvp in versionsByModId)
+        {
+            archiveVersionsByModId[kvp.Key] = kvp.Value;
+        }
+        RefreshCardDisplay();
     }
 
     public void SetFilterCounts(int enabledCount, int disabledCount)

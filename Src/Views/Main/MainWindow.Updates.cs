@@ -1,14 +1,18 @@
 using System;
 using System.Diagnostics;
+using System.Linq;
 using System.Net.Http;
 using System.Runtime.Versioning;
 using System.Threading;
 using System.Threading.Tasks;
+using STS2ModManager.Services;
 using STS2ModManager.Views.Dialogs;
 
 [SupportedOSPlatform("windows")]
 internal sealed partial class MainWindow
 {
+    private bool archiveMigrationDone;
+
     private async void HandleShown(object? sender, EventArgs eventArgs)
     {
         Shown -= HandleShown;
@@ -19,6 +23,8 @@ internal sealed partial class MainWindow
         // until the user toggles theme — see UI redesign sub-goal 5 notes.
         themeController.Refresh();
 
+        TryRunArchiveMigrationOnce();
+
         if (startupArchivePaths.Length > 0)
         {
             InstallArchives(startupArchivePaths, loc.Get("archive.archive_import_title"));
@@ -26,6 +32,154 @@ internal sealed partial class MainWindow
 
         await CheckForUpdatesOnStartupAsync();
     }
+
+    private void TryRunArchiveMigrationOnce()
+    {
+        if (archiveMigrationDone) return;
+        archiveMigrationDone = true;
+
+        try
+        {
+            // Step 1: rename the legacy ".mods" folder to the new default
+            // ".archive-mods" when the user has never customised the setting.
+            // Persist the new value so subsequent launches see it directly.
+            TryRenameLegacyArchiveDirectory();
+
+            var report = ModArchiveService.RunStartupMigration(disabledDirectory);
+
+            // Only surface the dialog if something actually happened (or failed).
+            // An idempotent re-run on a fully-migrated archive is silent.
+            var hasNoise = report.FlatLayoutsConverted > 0
+                || report.VersionsRecovered > 0
+                || report.Warnings.Count > 0;
+            if (!hasNoise)
+            {
+                return;
+            }
+
+            var summary = loc.Get(
+                "archive.startup_migration_summary",
+                report.FlatLayoutsConverted,
+                report.VersionsRecovered,
+                report.Warnings.Count);
+            SetStatus(summary);
+
+            var lines = new System.Text.StringBuilder();
+            lines.AppendLine(summary);
+            lines.AppendLine();
+            lines.AppendLine($"Archive: {disabledDirectory}");
+            lines.AppendLine();
+
+            var converted = report.Items.Where(i => i.Status == ModArchiveService.MigrationStatus.Converted).ToList();
+            var failed = report.Items.Where(i => i.Status == ModArchiveService.MigrationStatus.Failed).ToList();
+            var skipped = report.Items.Where(i => i.Status == ModArchiveService.MigrationStatus.AlreadyMigrated).ToList();
+
+            if (converted.Count > 0)
+            {
+                lines.AppendLine($"Converted ({converted.Count}):");
+                foreach (var item in converted)
+                {
+                    lines.AppendLine($"  + {item.ModId}  {item.Detail}");
+                }
+                lines.AppendLine();
+            }
+
+            if (failed.Count > 0)
+            {
+                lines.AppendLine($"Failed ({failed.Count}):");
+                foreach (var item in failed)
+                {
+                    lines.AppendLine($"  ! {item.ModId}  {item.Detail}");
+                }
+                lines.AppendLine();
+            }
+
+            if (skipped.Count > 0)
+            {
+                lines.AppendLine($"Already migrated ({skipped.Count}):");
+                foreach (var item in skipped)
+                {
+                    lines.AppendLine($"  . {item.ModId}  {item.Detail}");
+                }
+            }
+
+            MessageDialog.Info(
+                this,
+                loc,
+                loc.Get("archive.startup_migration_title"),
+                lines.ToString().TrimEnd());
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine($"Archive migration failed: {exception}");
+            MessageDialog.Error(
+                this,
+                loc,
+                loc.Get("archive.startup_migration_title"),
+                exception.Message);
+        }
+    }
+
+    /// <summary>
+    /// Renames the legacy <c>.mods</c> archive folder to <c>.archive-mods</c>
+    /// when the user is still on the old default. Persists the new name
+    /// to settings and refreshes derived paths so the rest of the migration
+    /// works against the new directory.
+    /// </summary>
+    private void TryRenameLegacyArchiveDirectory()
+    {
+        const string legacyName = ".mods";
+        const string newName = ".archive-mods";
+
+        if (!string.Equals(disabledDirectoryName, legacyName, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(gameDirectory))
+        {
+            return;
+        }
+
+        var legacyPath = System.IO.Path.Combine(gameDirectory, legacyName);
+        var newPath = System.IO.Path.Combine(gameDirectory, newName);
+
+        try
+        {
+            if (System.IO.Directory.Exists(legacyPath) && !System.IO.Directory.Exists(newPath))
+            {
+                System.IO.Directory.Move(legacyPath, newPath);
+            }
+            else if (!System.IO.Directory.Exists(legacyPath) && !System.IO.Directory.Exists(newPath))
+            {
+                // Neither exists -- nothing to rename, but still flip the setting.
+            }
+            else if (System.IO.Directory.Exists(legacyPath) && System.IO.Directory.Exists(newPath))
+            {
+                // Both exist (unusual). Don't overwrite -- bail with a warning
+                // so the user can resolve manually.
+                MessageDialog.Warn(
+                    this,
+                    loc,
+                    loc.Get("archive.startup_migration_title"),
+                    $"Both '{legacyPath}' and '{newPath}' exist. Please merge them manually; keeping '{legacyName}' for now.");
+                return;
+            }
+
+            disabledDirectoryName = newName;
+            UpdateDirectoryLabels();
+            SaveSettings(CurrentSettings());
+        }
+        catch (Exception ex)
+        {
+            MessageDialog.Warn(
+                this,
+                loc,
+                loc.Get("archive.startup_migration_title"),
+                $"Could not rename '{legacyName}' to '{newName}': {ex.Message}");
+        }
+    }
+
 
     private async Task CheckForUpdatesOnStartupAsync()
     {

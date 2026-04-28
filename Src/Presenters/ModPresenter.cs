@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.Versioning;
+using STS2ModManager.Models;
 using STS2ModManager.Views.Dialogs;
 using STS2ModManager.Services;
 using STS2ModManager.Services.UI;
@@ -80,11 +81,53 @@ internal sealed class ModPresenter
         try
         {
             onDirectoriesChanged();
-            var enabled = ModLoader.LoadMods(getModsDirectory());
-            var disabled = ModLoader.LoadMods(getDisabledDirectory());
+
+            var modsDir = getModsDirectory();
+            var archiveDir = getDisabledDirectory();
+
+            var archives = ModArchiveService.LoadAll(modsDir, archiveDir);
+
+            var enabled = new List<ModInfo>();
+            var disabled = new List<ModInfo>();
+            var versionMap = new Dictionary<string, IReadOnlyList<ModVersionEntry>>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var entry in archives)
+            {
+                versionMap[entry.Id] = entry.ArchivedVersions;
+
+                if (entry.Active is { } active)
+                {
+                    // Mirror the active install into the archive so the
+                    // version chooser always sees it. Best-effort -- a
+                    // stale mirror is corrected on the next reload.
+                    try
+                    {
+                        ModArchiveService.EnsureActiveMirrored(modsDir, archiveDir, active);
+                    }
+                    catch
+                    {
+                        // Swallow: mirror failure shouldn't block the UI.
+                    }
+
+                    enabled.Add(active);
+                }
+                else if (entry.ArchivedVersions.Count > 0)
+                {
+                    // Synthesize a placeholder mod that points at the per-mod
+                    // archive directory so "open folder" surfaces the zips.
+                    var newest = entry.ArchivedVersions[0];
+                    var placeholderFolder = System.IO.Path.Combine(archiveDir, entry.Id);
+                    disabled.Add(newest.Info with
+                    {
+                        FullPath = placeholderFolder,
+                        FolderName = entry.Id,
+                    });
+                }
+            }
 
             view.SetFilterCounts(enabled.Count, disabled.Count);
             view.SetMods(enabled, disabled);
+            view.SetArchiveData(versionMap);
             view.SetSelection(Array.Empty<string>());
             setStatus(statusText);
         }
